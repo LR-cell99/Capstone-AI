@@ -382,18 +382,32 @@ with col_jd:
     )
 
     if jd_file:
-        with st.spinner("Extracting JD text…"):
+        with st.spinner("Extracting and filtering JD…"):
             extracted_jd = extract_text(jd_file)
         if extracted_jd:
-            cleaned_jd = clean_jd_text(extracted_jd)
-            st.session_state.jd_text = cleaned_jd
-            removed = len(extracted_jd.split()) - len(cleaned_jd.split())
-            st.success(
-                f"✅ Extracted {len(cleaned_jd.split())} words from **{jd_file.name}**" +
-                (f" ({removed} words of boilerplate removed)" if removed > 0 else "")
-            )
-            with st.expander("Preview cleaned JD text"):
-                st.text(cleaned_jd[:1500] + ("…" if len(cleaned_jd) > 1500 else ""))
+            # Step 1: regex pre-clean to remove obvious portal boilerplate
+            pre_cleaned = clean_jd_text(extracted_jd)
+
+            # Step 2: AI extraction to keep only role-relevant content
+            try:
+                _client = openai.OpenAI(api_key=OPENAI_API_KEY)
+                _jd_resp = _client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": JD_EXTRACT_PROMPT},
+                        {"role": "user", "content": pre_cleaned},
+                    ],
+                    temperature=0.0,
+                    max_tokens=1000,
+                )
+                ai_cleaned_jd = _jd_resp.choices[0].message.content.strip()
+            except Exception:
+                ai_cleaned_jd = pre_cleaned
+
+            st.session_state.jd_text = ai_cleaned_jd
+            st.success(f"✅ JD processed from **{jd_file.name}** — showing relevant content only")
+            with st.expander("Preview extracted JD"):
+                st.text(ai_cleaned_jd[:1500] + ("…" if len(ai_cleaned_jd) > 1500 else ""))
         else:
             st.error("Could not extract text. Try a different file format.")
 
@@ -434,23 +448,7 @@ if enhance_clicked:
     else:
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-        with st.spinner("Step 1/2 — Cleaning and extracting JD…"):
-            try:
-                jd_response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": JD_EXTRACT_PROMPT},
-                        {"role": "user", "content": clean_jd_text(st.session_state.jd_text)},
-                    ],
-                    temperature=0.0,
-                    max_tokens=1000,
-                )
-                clean_jd = jd_response.choices[0].message.content.strip()
-            except Exception as e:
-                st.error(f"JD extraction failed: {e}")
-                clean_jd = clean_jd_text(st.session_state.jd_text)
-
-        with st.spinner("Step 2/2 — Enhancing your resume…"):
+        with st.spinner("Enhancing your resume…"):
             try:
                 response = client.chat.completions.create(
                     model=model,
@@ -458,7 +456,7 @@ if enhance_clicked:
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": (
                             f"## Candidate Resume\n\n{st.session_state.resume_text}"
-                            f"\n\n---\n\n## Job Description\n\n{clean_jd}"
+                            f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
                         )},
                     ],
                     temperature=0.4,
@@ -496,26 +494,37 @@ if enhance_clicked:
 # ── Output ─────────────────────────────────────────────────────────────────────
 st.divider()
 st.subheader("Enhanced Resume Output")
+st.caption("Edit the resume directly below before exporting.")
 
 if st.session_state.enhanced_resume:
-    st.text_area(
-        label="enhanced_output",
+    # Seed the editable copy once when AI output first arrives,
+    # then let the user's edits persist independently.
+    if "edited_resume" not in st.session_state or             st.session_state.get("_last_enhanced") != st.session_state.enhanced_resume:
+        st.session_state.edited_resume = st.session_state.enhanced_resume
+        st.session_state._last_enhanced = st.session_state.enhanced_resume
+
+    edited = st.text_area(
+        label="Edit resume",
         label_visibility="collapsed",
-        value=st.session_state.enhanced_resume,
-        height=400,
-        key="enhanced_output",
+        value=st.session_state.edited_resume,
+        height=500,
+        key="editable_output",
+        help="You can edit this text directly. Your changes will be used when exporting.",
     )
-    col_dl1, col_dl2, col_rest = st.columns([1, 1, 4])
+    # Keep session state in sync with whatever the user typed
+    st.session_state.edited_resume = edited
+
+    col_dl1, col_dl2, col_reset, col_rest = st.columns([1, 1, 1, 3])
     with col_dl1:
         st.download_button(
             label="⬇ Download .txt",
-            data=st.session_state.enhanced_resume,
+            data=edited,
             file_name=f"enhanced_resume_{date.today().isoformat()}.txt",
             mime="text/plain",
             use_container_width=True,
         )
     with col_dl2:
-        pdf_bytes = generate_pdf(st.session_state.enhanced_resume)
+        pdf_bytes = generate_pdf(edited)
         st.download_button(
             label="⬇ Download .pdf",
             data=pdf_bytes,
@@ -523,6 +532,10 @@ if st.session_state.enhanced_resume:
             mime="application/pdf",
             use_container_width=True,
         )
+    with col_reset:
+        if st.button("↺ Reset edits", use_container_width=True, help="Revert to the original AI output"):
+            st.session_state.edited_resume = st.session_state.enhanced_resume
+            st.rerun()
 else:
     st.markdown(
         '<div class="output-box">Your enhanced resume will appear here after clicking Enhance Resume.</div>',
