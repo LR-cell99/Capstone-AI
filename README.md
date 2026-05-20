@@ -1,71 +1,71 @@
-# Day 4 Resume Analyzer — Track B Starter
+# Capstone-AI
 
-> **Track B** — you vibe-code with Claude. `main.py` is already working. You build the three modules (`parse.py`, `prompts.py`, `analyzer.py`) using Claude.ai as your AI coding tutor.
+> AI-powered resume enhancer — tailored to job descriptions
 
-## Quick setup
+![Python](https://img.shields.io/badge/Python-3-blue) ![OpenAI](https://img.shields.io/badge/API-OpenAI-green) ![Streamlit](https://img.shields.io/badge/UI-Streamlit-red)
 
-```bash
-# 1. Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+---
 
-# 2. Install dependencies
-pip install -r requirements.txt
+## Section 1 — Project Title & Description
 
-# 3. Copy .env.example and fill in your API key
-cp .env.example .env
-# Edit .env — set OPENAI_API_KEY (or your preferred provider)
-```
+### AI Enhancer
 
-## Run the analyzer
+AI Enhancer takes two inputs — a user's resume and a downloaded Job Description (JD) file — runs them through the application, and outputs two files:
 
-```bash
-python main.py \
-  --resume path/to/your_resume.pdf \
-  --jd     inputs/job_rtis_systems_engineer.txt \
-  --degree RTIS
-```
+- An AI-enhanced resume saved to a `resume/` folder
+- An iterative Excel tracker to log applications
 
-Reports are saved to `outputs/` as both `.json` and `.md`.
+Designed for anyone who wants stronger, ATS-optimised resumes with minimal effort.
 
-## File guide
+| No. | Company | Job | Application Status |
+|-----|---------|-----|--------------------|
+| 1   |         |     | _(dropdown)_       |
+| 2   |         |     | _(dropdown)_       |
 
-| File | Your job |
-|---|---|
-| `parse.py` | ✏️ **Build with Claude** — Task 1 |
-| `prompts.py` | ✏️ **Build with Claude** — Task 3 |
-| `analyzer.py` | ✏️ **Build with Claude** — Task 4 |
-| `main.py` | ✅ Pre-provided and complete — read it as your blueprint |
-| `llm.py` | ✅ Pre-provided — read it, don't edit |
-| `report.py` | ✅ Pre-provided — read it, don't edit |
+---
 
-## How to build each file
+## Section 2 — Problem Statement
 
-Open **Claude.ai** in your browser and use the paste-into-Claude prompts provided in your tutorial guide (Track B lab, Tasks 1, 3, 4).
+Most resumes fail ATS (Applicant Tracking System) checks before a human ever reads them. This tool uses AI to tailor and enhance resumes against specific JDs, increasing the chance of passing automated filters and landing interviews.
 
-Each prompt gives Claude:
-- The function signature you need
-- The behaviour it must have
-- The exact output format
-- What _not_ to do (never rewrite résumé content)
+---
 
-Paste Claude's output into the appropriate `.py` file, then run the checkpoint command from your tutorial to verify.
+## Section 3 — Technology Stack
 
-## Progress checkpoints
+**Language**
+- Python
 
-```bash
-# Task 1 checkpoint — parse.py
-python -c "from parse import read_jd_text; print(read_jd_text('inputs/job_rtis_systems_engineer.txt')[:200])"
+**Libraries**
+- `python-dotenv`
+- `streamlit`
 
-# Task 3 checkpoint — prompts.py
-python -c "from prompts import RESUME_PROFILE_PROMPT; print(RESUME_PROFILE_PROMPT[:100])"
+**API**
+- OpenAI
 
-# Task 4 checkpoint — analyzer.py
-python -c "from analyzer import extract_jd_profile; from parse import read_jd_text; print(extract_jd_profile(read_jd_text('inputs/job_rtis_systems_engineer.txt')))"
-```
+---
 
-## Stretch goals
+## Section 4 — Setup Instructions
 
-- Change `MODEL=` in `.env` to use a local Ollama model — no code changes needed.
-- Ask Claude to add a `--verbose` flag to `main.py` that prints each LLM response.
-- Ask Claude to write a Streamlit UI wrapper around the analyzer.
+1. Clone the repository
+2. Install dependencies
+3. Copy `.env.example` to `.env` and fill in your API key
+4. Run the application
+
+---
+
+## Section 5 — Usage Examples
+
+- Enhances resumes that can pass ATS checks
+
+---
+
+## Section 6 — Known Limitations
+
+> **Note:** Requires human validation — always review the enhanced resume to ensure the AI has not hallucinated skills or experience that do not exist.
+> **Note:** 
+
+---
+
+## Section 7 — Future Improvements
+
+- Filter to specific roles and scrape JD data from non-dynamic job sites, removing the manual search step and increasing the volume of applications processed automatically.
