@@ -6,9 +6,55 @@ from datetime import date
 from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
+from fpdf import FPDF
 
 load_dotenv()  # loads OPENAI_API_KEY from .env
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+
+# ── PDF generator ──────────────────────────────────────────────────────────────
+def generate_pdf(text: str) -> bytes:
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_margins(20, 20, 20)
+    pdf.set_auto_page_break(auto=True, margin=20)
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+
+        # Section headers: all-caps or ends with colon
+        if stripped.isupper() and len(stripped) > 2:
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.ln(3)
+            pdf.cell(0, 8, stripped, ln=True)
+            pdf.set_draw_color(45, 90, 61)
+            pdf.set_line_width(0.5)
+            pdf.line(20, pdf.get_y(), 190, pdf.get_y())
+            pdf.ln(2)
+
+        # Bullet points
+        elif stripped.startswith(("-", "•", "*")):
+            pdf.set_font("Helvetica", "", 10)
+            content = stripped.lstrip("-•* ").strip()
+            pdf.set_x(25)
+            pdf.cell(5, 6, "•", ln=False)
+            pdf.multi_cell(0, 6, content)
+
+        # Bold-like lines (short lines that look like job titles/dates)
+        elif len(stripped) > 0 and len(stripped) < 60 and not stripped.endswith("."):
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(0, 6, stripped, ln=True)
+
+        # Normal body text
+        elif stripped:
+            pdf.set_font("Helvetica", "", 10)
+            pdf.multi_cell(0, 6, stripped)
+
+        # Blank lines
+        else:
+            pdf.ln(3)
+
+    return bytes(pdf.output())
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -20,16 +66,16 @@ st.set_page_config(
 # ── Custom CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main { background-color: #f5f2ee; }
     .block-container { padding-top: 2rem; padding-bottom: 3rem; }
-    h1 { font-size: 2rem !important; color: #1a1714 !important; }
+
+    /* Text areas — let Streamlit control bg/text, only override font */
     .stTextArea textarea {
         font-family: 'DM Mono', monospace;
         font-size: 13px;
-        background-color: #ffffff;
-        border: 1px solid #e0dbd3;
         border-radius: 10px;
     }
+
+    /* Buttons */
     .stButton > button {
         background-color: #2d5a3d;
         color: white;
@@ -39,17 +85,27 @@ st.markdown("""
         font-weight: 500;
     }
     .stButton > button:hover { background-color: #214a2e; }
+
+    /* Warning box — dark mode aware */
     .warn-box {
-        background: #fdf6e3;
         border: 1px solid #e6c87a;
         border-radius: 10px;
         padding: 0.75rem 1rem;
         font-size: 13px;
-        color: #7a5a10;
         margin: 1rem 0;
+        background: #fdf6e3;
+        color: #7a5a10;
     }
+    @media (prefers-color-scheme: dark) {
+        .warn-box {
+            background: #2a2200;
+            color: #f0c040;
+            border-color: #7a5a10;
+        }
+    }
+
+    /* Output placeholder box — dark mode aware */
     .output-box {
-        background: #ffffff;
         border: 1px solid #e0dbd3;
         border-radius: 12px;
         padding: 1.25rem;
@@ -58,11 +114,8 @@ st.markdown("""
         line-height: 1.8;
         white-space: pre-wrap;
         min-height: 200px;
-    }
-    div[data-testid="stExpander"] {
-        background: #ffffff;
-        border: 1px solid #e0dbd3;
-        border-radius: 12px;
+        background: transparent;
+        color: #bbb5ad;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -252,12 +305,24 @@ if st.session_state.enhanced_resume:
         height=400,
         key="enhanced_output",
     )
-    st.download_button(
-        label="⬇ Download as .txt",
-        data=st.session_state.enhanced_resume,
-        file_name=f"enhanced_resume_{date.today().isoformat()}.txt",
-        mime="text/plain",
-    )
+    col_dl1, col_dl2, col_rest = st.columns([1, 1, 4])
+    with col_dl1:
+        st.download_button(
+            label="⬇ Download .txt",
+            data=st.session_state.enhanced_resume,
+            file_name=f"enhanced_resume_{date.today().isoformat()}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    with col_dl2:
+        pdf_bytes = generate_pdf(st.session_state.enhanced_resume)
+        st.download_button(
+            label="⬇ Download .pdf",
+            data=pdf_bytes,
+            file_name=f"enhanced_resume_{date.today().isoformat()}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
 else:
     st.markdown(
         '<div class="output-box" style="color:#bbb5ad;font-family:sans-serif;font-style:italic">'
