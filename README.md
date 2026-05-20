@@ -55,13 +55,13 @@ pip install -r requirements.txt
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `streamlit` | ≥1.35.0 | Web UI |
-| `openai` | ≥1.30.0 | AI API calls |
-| `pdfplumber` | ≥0.11.0 | Extract text from PDF resumes/JDs |
-| `python-docx` | ≥1.1.0 | Extract text from Word `.docx` files |
-| `fpdf2` | ≥2.7.9 | Export enhanced resume as PDF |
-| `pandas` | ≥2.0.0 | Application tracker |
-| `python-dotenv` | ≥1.0.0 | Load API key from `.env` file |
+| `streamlit` | 1.45.1 | Web UI |
+| `openai` | 1.83.0 | AI API calls |
+| `pdfplumber` | 0.11.9 | Extract text from PDF resumes/JDs |
+| `python-docx` | 1.2.0 | Extract text from Word `.docx` files |
+| `fpdf2` | 2.8.7 | Export enhanced resume as PDF |
+| `pandas` | 3.0.0 | Application tracker |
+| `python-dotenv` | 1.1.0 | Load API key from `.env` file |
 
 3. Copy `.env.example` to `.env` and fill in your API key
 
