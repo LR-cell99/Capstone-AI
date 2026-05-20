@@ -2,17 +2,56 @@ import streamlit as st
 import openai
 import os
 import re
+import io
 from datetime import date
 from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 from fpdf import FPDF
+import pdfplumber
+import docx
 
-load_dotenv()  # loads OPENAI_API_KEY from .env
+load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
-# ── PDF generator ──────────────────────────────────────────────────────────────
+# ── Text extraction ────────────────────────────────────────────────────────────
+def extract_text_from_pdf(file) -> str:
+    text = []
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text.append(t)
+    return "\n".join(text).strip()
+
+
+def extract_text_from_docx(file) -> str:
+    doc = docx.Document(file)
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    return "\n".join(paragraphs).strip()
+
+
+def extract_text_from_txt(file) -> str:
+    return file.read().decode("utf-8", errors="ignore").strip()
+
+
+def extract_text(uploaded_file) -> str:
+    """Route to correct extractor based on file type."""
+    name = uploaded_file.name.lower()
+    file_bytes = io.BytesIO(uploaded_file.read())
+    if name.endswith(".pdf"):
+        return extract_text_from_pdf(file_bytes)
+    elif name.endswith(".docx"):
+        return extract_text_from_docx(file_bytes)
+    elif name.endswith(".txt"):
+        file_bytes.seek(0)
+        return file_bytes.read().decode("utf-8", errors="ignore").strip()
+    else:
+        return ""
+
+
+# ── PDF export ─────────────────────────────────────────────────────────────────
 def generate_pdf(text: str) -> bytes:
     pdf = FPDF()
     pdf.add_page()
@@ -21,8 +60,6 @@ def generate_pdf(text: str) -> bytes:
 
     for line in text.split("\n"):
         stripped = line.strip()
-
-        # Section headers: all-caps or ends with colon
         if stripped.isupper() and len(stripped) > 2:
             pdf.set_font("Helvetica", "B", 13)
             pdf.ln(3)
@@ -31,113 +68,25 @@ def generate_pdf(text: str) -> bytes:
             pdf.set_line_width(0.5)
             pdf.line(20, pdf.get_y(), 190, pdf.get_y())
             pdf.ln(2)
-
-        # Bullet points
         elif stripped.startswith(("-", "•", "*")):
             pdf.set_font("Helvetica", "", 10)
             content = stripped.lstrip("-•* ").strip()
             pdf.set_x(25)
             pdf.cell(5, 6, "•", ln=False)
             pdf.multi_cell(0, 6, content)
-
-        # Bold-like lines (short lines that look like job titles/dates)
-        elif len(stripped) > 0 and len(stripped) < 60 and not stripped.endswith("."):
+        elif stripped and len(stripped) < 60 and not stripped.endswith("."):
             pdf.set_font("Helvetica", "B", 10)
             pdf.cell(0, 6, stripped, ln=True)
-
-        # Normal body text
         elif stripped:
             pdf.set_font("Helvetica", "", 10)
             pdf.multi_cell(0, 6, stripped)
-
-        # Blank lines
         else:
             pdf.ln(3)
 
     return bytes(pdf.output())
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="AI Resume Enhancer",
-    page_icon="📄",
-    layout="wide",
-)
 
-# ── Custom CSS ─────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    .block-container { padding-top: 2rem; padding-bottom: 3rem; }
-
-    /* Text areas — let Streamlit control bg/text, only override font */
-    .stTextArea textarea {
-        font-family: 'DM Mono', monospace;
-        font-size: 13px;
-        border-radius: 10px;
-    }
-
-    /* Buttons */
-    .stButton > button {
-        background-color: #2d5a3d;
-        color: white;
-        border: none;
-        border-radius: 10px;
-        padding: 0.5rem 1.5rem;
-        font-weight: 500;
-    }
-    .stButton > button:hover { background-color: #214a2e; }
-
-    /* Warning box — dark mode aware */
-    .warn-box {
-        border: 1px solid #e6c87a;
-        border-radius: 10px;
-        padding: 0.75rem 1rem;
-        font-size: 13px;
-        margin: 1rem 0;
-        background: #fdf6e3;
-        color: #7a5a10;
-    }
-    @media (prefers-color-scheme: dark) {
-        .warn-box {
-            background: #2a2200;
-            color: #f0c040;
-            border-color: #7a5a10;
-        }
-    }
-
-    /* Output placeholder box — dark mode aware */
-    .output-box {
-        border: 1px solid #e0dbd3;
-        border-radius: 12px;
-        padding: 1.25rem;
-        font-family: 'DM Mono', monospace;
-        font-size: 13px;
-        line-height: 1.8;
-        white-space: pre-wrap;
-        min-height: 200px;
-        background: transparent;
-        color: #bbb5ad;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ── System prompt ──────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are an expert resume writer and ATS optimisation specialist.
-
-Your task: rewrite the candidate's resume so it is strongly tailored to the job description provided.
-
-Rules:
-- Preserve the same section structure (Summary, Experience, Skills, Education, etc.)
-- NEVER invent or hallucinate skills, roles, or achievements the candidate does not have
-- Incorporate relevant JD keywords naturally into bullet points and the summary
-- Use strong action verbs (led, built, reduced, drove, optimised, delivered, etc.)
-- Quantify achievements where the original data supports it
-- Write bullet points in result-first or STAR format where possible
-- Summary: 3–5 lines, tightly matched to the JD's key requirements
-- Output ONLY the enhanced resume as plain text — no preamble, no commentary, no markdown fences"""
-
-
-# ── Helper: extract company/role from JD ──────────────────────────────────────
+# ── JD helpers ─────────────────────────────────────────────────────────────────
 def guess_company(jd: str) -> str:
     m = re.search(r'(?:at|@|about\s+)([A-Z][A-Za-z0-9&\s.,\']+?)(?:\n|,|\.|\s+is\s|\s+are\s)', jd)
     return m.group(1).strip()[:50] if m else ""
@@ -147,34 +96,92 @@ def guess_role(jd: str) -> str:
     return m.group(1).strip()[:60] if m else ""
 
 
-# ── Session state init ─────────────────────────────────────────────────────────
+# ── System prompt ──────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are an expert resume writer and ATS optimisation specialist.
+
+You will receive a candidate's resume and a job description. Your job is to:
+
+1. EXTRACT from the resume:
+   - Candidate name, contact info, summary
+   - All work experience (company, title, dates, responsibilities, achievements)
+   - Skills (technical and soft)
+   - Education and certifications
+
+2. EXTRACT from the job description:
+   - Role title and key responsibilities
+   - Required and preferred skills/qualifications
+   - Keywords and phrases used repeatedly
+   - Seniority level and culture signals
+
+3. REWRITE the resume tailored to the JD:
+   - Preserve the same section structure
+   - NEVER invent or hallucinate skills, roles, or achievements
+   - Weave JD keywords naturally into bullet points and summary
+   - Use strong action verbs (led, built, reduced, drove, optimised, delivered)
+   - Quantify achievements where the original data supports it
+   - Bullet points in result-first or STAR format
+   - Summary: 3–5 lines tightly matched to the JD
+
+Output ONLY the enhanced resume as plain text — no preamble, no commentary, no markdown fences."""
+
+
+# ── Session state ──────────────────────────────────────────────────────────────
 if "enhanced_resume" not in st.session_state:
     st.session_state.enhanced_resume = ""
-
-if "tracker" not in st.session_state:
-    st.session_state.tracker = pd.DataFrame(
-        columns=["#", "Company", "Role", "Date Applied", "Status"]
-    )
-
+if "resume_text" not in st.session_state:
+    st.session_state.resume_text = ""
+if "jd_text" not in st.session_state:
+    st.session_state.jd_text = ""
 if "tracker_edit" not in st.session_state:
     st.session_state.tracker_edit = pd.DataFrame(
         [{"Company": "", "Role": "", "Date Applied": str(date.today()), "Status": "Pending"}] * 2
     )
 
 
-# ── Header ─────────────────────────────────────────────────────────────────────
-col_title, col_badge = st.columns([4, 1])
-with col_title:
-    st.markdown("# 📄 AI Resume Enhancer")
-    st.caption("ATS-optimised resumes tailored to your target job description — powered by OpenAI")
+# ── Page config ────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="AI Resume Enhancer", page_icon="📄", layout="wide")
 
+st.markdown("""
+<style>
+    .block-container { padding-top: 2rem; padding-bottom: 3rem; }
+    .stTextArea textarea { font-family: 'DM Mono', monospace; font-size: 13px; border-radius: 10px; }
+    .stButton > button {
+        background-color: #2d5a3d; color: white; border: none;
+        border-radius: 10px; padding: 0.5rem 1.5rem; font-weight: 500;
+    }
+    .stButton > button:hover { background-color: #214a2e; }
+    .warn-box {
+        border: 1px solid #e6c87a; border-radius: 10px;
+        padding: 0.75rem 1rem; font-size: 13px; margin: 1rem 0;
+        background: #fdf6e3; color: #7a5a10;
+    }
+    @media (prefers-color-scheme: dark) {
+        .warn-box { background: #2a2200; color: #f0c040; border-color: #7a5a10; }
+    }
+    .output-box {
+        border: 1px solid #e0dbd3; border-radius: 12px; padding: 1.25rem;
+        font-family: 'DM Mono', monospace; font-size: 13px;
+        line-height: 1.8; white-space: pre-wrap; min-height: 200px;
+        background: transparent; color: #bbb5ad;
+    }
+    .extract-preview {
+        border-radius: 8px; padding: 0.6rem 0.9rem;
+        font-size: 12px; font-family: monospace;
+        line-height: 1.6; max-height: 180px; overflow-y: auto;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── Header ─────────────────────────────────────────────────────────────────────
+st.markdown("# 📄 AI Resume Enhancer")
+st.caption("Upload your resume and JD — the AI extracts, analyses, and tailors automatically.")
 st.divider()
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-
     if OPENAI_API_KEY:
         st.success("✅ API key loaded from .env")
     else:
@@ -188,41 +195,88 @@ with st.sidebar:
     )
 
     st.divider()
-    st.markdown("**Output folder**")
-    output_dir = st.text_input("Save enhanced resumes to:", value="resume/")
-    st.caption("Enhanced resumes are saved here as `.txt` files.")
+    output_dir = st.text_input("Save resumes to folder:", value="resume/")
 
     st.divider()
     st.markdown("""
-**Tips for best results:**
-- Paste the *full* JD, including requirements
-- Include all your experience in the resume input
-- Review output carefully before applying
+**Supported file types:**
+- Resume: PDF, DOCX, TXT
+- JD: PDF, DOCX, TXT
+
+**Tips:**
+- Upload the full JD for best keyword matching
+- Review the extracted text before enhancing
+- Always validate the output before applying
 """)
 
 
-# ── Input panels ───────────────────────────────────────────────────────────────
+# ── Upload panels ──────────────────────────────────────────────────────────────
 col_resume, col_jd = st.columns(2)
 
 with col_resume:
-    st.subheader("Your Resume")
-    resume_text = st.text_area(
-        label="resume_input",
+    st.subheader("📎 Your Resume")
+    resume_file = st.file_uploader(
+        "Upload resume",
+        type=["pdf", "docx", "txt"],
         label_visibility="collapsed",
-        placeholder="Paste your full resume as plain text…\n\nInclude: work experience, skills, education, summary, achievements — everything.",
-        height=350,
-        key="resume_input",
+        key="resume_upload",
     )
 
+    if resume_file:
+        with st.spinner("Extracting resume text…"):
+            extracted = extract_text(resume_file)
+        if extracted:
+            st.session_state.resume_text = extracted
+            st.success(f"✅ Extracted {len(extracted.split())} words from **{resume_file.name}**")
+            with st.expander("Preview extracted text"):
+                st.text(extracted[:1500] + ("…" if len(extracted) > 1500 else ""))
+        else:
+            st.error("Could not extract text. Try a different file format.")
+
+    # Fallback: manual paste
+    with st.expander("Or paste resume manually"):
+        manual_resume = st.text_area(
+            "Resume text",
+            label_visibility="collapsed",
+            placeholder="Paste your resume here as plain text…",
+            height=200,
+            key="manual_resume",
+        )
+        if manual_resume.strip():
+            st.session_state.resume_text = manual_resume
+
+
 with col_jd:
-    st.subheader("Job Description")
-    jd_text = st.text_area(
-        label="jd_input",
+    st.subheader("📋 Job Description")
+    jd_file = st.file_uploader(
+        "Upload JD",
+        type=["pdf", "docx", "txt"],
         label_visibility="collapsed",
-        placeholder="Paste the full job description here…\n\nInclude responsibilities, requirements, and nice-to-haves for best results.",
-        height=350,
-        key="jd_input",
+        key="jd_upload",
     )
+
+    if jd_file:
+        with st.spinner("Extracting JD text…"):
+            extracted_jd = extract_text(jd_file)
+        if extracted_jd:
+            st.session_state.jd_text = extracted_jd
+            st.success(f"✅ Extracted {len(extracted_jd.split())} words from **{jd_file.name}**")
+            with st.expander("Preview extracted text"):
+                st.text(extracted_jd[:1500] + ("…" if len(extracted_jd) > 1500 else ""))
+        else:
+            st.error("Could not extract text. Try a different file format.")
+
+    # Fallback: manual paste
+    with st.expander("Or paste JD manually"):
+        manual_jd = st.text_area(
+            "JD text",
+            label_visibility="collapsed",
+            placeholder="Paste the job description here…",
+            height=200,
+            key="manual_jd",
+        )
+        if manual_jd.strip():
+            st.session_state.jd_text = manual_jd
 
 
 # ── Enhance button ─────────────────────────────────────────────────────────────
@@ -233,30 +287,33 @@ with col_btn:
     enhance_clicked = st.button("⚡ Enhance Resume", use_container_width=True)
 
 with col_clear:
-    if st.button("Clear", use_container_width=False):
+    if st.button("Clear all"):
         st.session_state.enhanced_resume = ""
-        st.session_state.resume_input = ""
-        st.session_state.jd_input = ""
+        st.session_state.resume_text = ""
+        st.session_state.jd_text = ""
         st.rerun()
 
 
 if enhance_clicked:
     if not OPENAI_API_KEY:
         st.error("OPENAI_API_KEY not found. Please add it to your .env file.")
-    elif not resume_text.strip():
-        st.error("Please paste your resume text.")
-    elif not jd_text.strip():
-        st.error("Please paste the job description.")
+    elif not st.session_state.resume_text.strip():
+        st.error("Please upload a resume or paste one manually.")
+    elif not st.session_state.jd_text.strip():
+        st.error("Please upload a job description or paste one manually.")
     else:
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-        with st.spinner("Enhancing your resume…"):
+        with st.spinner("Extracting key info and enhancing your resume…"):
             try:
                 response = client.chat.completions.create(
                     model=model,
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": f"## My Resume\n\n{resume_text}\n\n---\n\n## Job Description\n\n{jd_text}"},
+                        {"role": "user", "content": (
+                            f"## Candidate Resume\n\n{st.session_state.resume_text}"
+                            f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
+                        )},
                     ],
                     temperature=0.4,
                     max_tokens=2500,
@@ -264,16 +321,15 @@ if enhance_clicked:
                 enhanced = response.choices[0].message.content.strip()
                 st.session_state.enhanced_resume = enhanced
 
-                # Save to file
+                # Save txt to folder
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
-                filename = f"enhanced_{date.today().isoformat()}.txt"
-                filepath = Path(output_dir) / filename
+                filepath = Path(output_dir) / f"enhanced_{date.today().isoformat()}.txt"
                 filepath.write_text(enhanced, encoding="utf-8")
-                st.success(f"Saved to `{filepath}`")
+                st.success(f"✅ Saved to `{filepath}`")
 
                 # Auto-log to tracker
-                company = guess_company(jd_text)
-                role    = guess_role(jd_text)
+                company = guess_company(st.session_state.jd_text)
+                role    = guess_role(st.session_state.jd_text)
                 if company or role:
                     new_row = pd.DataFrame([{
                         "Company": company,
@@ -325,13 +381,10 @@ if st.session_state.enhanced_resume:
         )
 else:
     st.markdown(
-        '<div class="output-box" style="color:#bbb5ad;font-family:sans-serif;font-style:italic">'
-        'Your enhanced resume will appear here after clicking Enhance Resume.'
-        '</div>',
+        '<div class="output-box">Your enhanced resume will appear here after clicking Enhance Resume.</div>',
         unsafe_allow_html=True,
     )
 
-# Warning box
 st.markdown(
     '<div class="warn-box">⚠️ <strong>Always review the enhanced resume carefully.</strong> '
     'AI may occasionally embellish skills or experience — validate every change before submitting applications.</div>',
@@ -351,11 +404,7 @@ edited = st.data_editor(
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Status": st.column_config.SelectboxColumn(
-            "Status",
-            options=STATUS_OPTIONS,
-            required=True,
-        ),
+        "Status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS, required=True),
         "Date Applied": st.column_config.TextColumn("Date Applied"),
     },
     key="tracker_editor",
@@ -363,12 +412,11 @@ edited = st.data_editor(
 
 st.session_state.tracker_edit = edited
 
-col_exp, col_dl = st.columns([1, 5])
+col_exp, _ = st.columns([1, 5])
 with col_exp:
-    csv_data = edited.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="⬇ Export CSV",
-        data=csv_data,
+        data=edited.to_csv(index=False).encode("utf-8"),
         file_name=f"applications_{date.today().isoformat()}.csv",
         mime="text/csv",
         use_container_width=True,
