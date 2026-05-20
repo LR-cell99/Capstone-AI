@@ -228,20 +228,35 @@ OUTPUT RULES — strictly enforced:
 
 # ── JD extraction prompt ──────────────────────────────────────────────────────
 JD_EXTRACT_PROMPT = """You are a job description parser. You will receive raw text scraped from a job portal.
-It may contain noise such as cookie banners, salary info, registration numbers, UI buttons, unrelated listings, and platform boilerplate.
+It will contain noise: cookie banners, salary ranges, EA/registration numbers, recruiter labels, portal UI elements, application instructions, and unrelated job listings.
 
-Your job is to extract ONLY the following from the actual job posting:
-1. Company name (if mentioned)
+Your job is to extract ONLY the following from the actual job posting itself:
+
+1. Company name
+   - This must be the actual hiring company or organisation, NOT a recruiter label, applicant status tag, or portal badge.
+   - Examples of things that are NOT company names: "Strong applicant", "Top applicant", "Inter Island Manpower", "Quick apply", "Active today"
+   - If you cannot confidently identify the real company name, leave this blank — do not guess.
+
 2. Job title / role
-3. About the company (if mentioned)
-4. Key responsibilities and duties
-5. Required qualifications and skills
-6. Preferred / nice-to-have qualifications
-7. Any other information directly relevant to the role
 
-Output ONLY the extracted content as clean plain text with clear section labels.
-Do NOT include salary, benefits, EA numbers, registration numbers, application instructions, cookie notices, or any portal UI text.
-If a section is not present in the JD, skip it entirely — do not invent content."""
+3. About the company
+   - Only include if there is a genuine company description in the JD.
+   - Do NOT include recruiter agency descriptions.
+
+4. Key responsibilities and duties
+
+5. Required qualifications and skills
+
+6. Preferred / nice-to-have qualifications
+
+7. Any other content directly relevant to performing the role
+
+OUTPUT RULES:
+- Output clean plain text with the section labels above.
+- Do NOT include salary, benefits, allowances, EA numbers, registration numbers, application instructions, cookie notices, portal UI text, or recruiter boilerplate.
+- Do NOT include applicant status labels like "Strong applicant", "Medium application volume", "Posted X ago".
+- If a section is not present in the JD, skip it entirely — do not invent or guess content.
+- When in doubt about whether something is real JD content or portal noise, leave it out."""
 
 
 # ── Session state ──────────────────────────────────────────────────────────────
