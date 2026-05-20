@@ -9,7 +9,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from fpdf import FPDF
 import pdfplumber
-import docx
+from docx import Document
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -27,7 +27,7 @@ def extract_text_from_pdf(file) -> str:
 
 
 def extract_text_from_docx(file) -> str:
-    doc = docx.Document(file)
+    doc = Document(file)
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     return "\n".join(paragraphs).strip()
 
