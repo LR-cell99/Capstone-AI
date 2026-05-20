@@ -45,6 +45,34 @@ def extract_text(uploaded_file) -> str:
     return ""
 
 
+# ── Base resume auto-loader ───────────────────────────────────────────────────
+BASE_RESUME_DIR = Path("base_resume")
+SUPPORTED_EXTS = (".pdf", ".docx", ".txt")
+
+def load_base_resume() -> tuple[str, str]:
+    """
+    Look for a resume file in the base_resume/ folder.
+    Returns (extracted_text, filename) or ("", "") if none found.
+    """
+    if not BASE_RESUME_DIR.exists():
+        return "", ""
+    for ext in SUPPORTED_EXTS:
+        matches = list(BASE_RESUME_DIR.glob(f"*{ext}"))
+        if matches:
+            filepath = matches[0]
+            with open(filepath, "rb") as f:
+                file_bytes = io.BytesIO(f.read())
+            if ext == ".pdf":
+                text = extract_text_from_pdf(file_bytes)
+            elif ext == ".docx":
+                text = extract_text_from_docx(file_bytes)
+            else:
+                file_bytes.seek(0)
+                text = file_bytes.read().decode("utf-8", errors="ignore").strip()
+            return text, filepath.name
+    return "", ""
+
+
 # ── PDF export ─────────────────────────────────────────────────────────────────
 def sanitise_for_pdf(text: str) -> str:
     """Replace Unicode chars unsupported by Helvetica (latin-1 only)."""
@@ -198,17 +226,42 @@ OUTPUT RULES — strictly enforced:
 - The very last character must be the end of the resume content. Nothing after it."""
 
 
+# ── JD extraction prompt ──────────────────────────────────────────────────────
+JD_EXTRACT_PROMPT = """You are a job description parser. You will receive raw text scraped from a job portal.
+It may contain noise such as cookie banners, salary info, registration numbers, UI buttons, unrelated listings, and platform boilerplate.
+
+Your job is to extract ONLY the following from the actual job posting:
+1. Company name (if mentioned)
+2. Job title / role
+3. About the company (if mentioned)
+4. Key responsibilities and duties
+5. Required qualifications and skills
+6. Preferred / nice-to-have qualifications
+7. Any other information directly relevant to the role
+
+Output ONLY the extracted content as clean plain text with clear section labels.
+Do NOT include salary, benefits, EA numbers, registration numbers, application instructions, cookie notices, or any portal UI text.
+If a section is not present in the JD, skip it entirely — do not invent content."""
+
+
 # ── Session state ──────────────────────────────────────────────────────────────
 if "enhanced_resume" not in st.session_state:
     st.session_state.enhanced_resume = ""
-if "resume_text" not in st.session_state:
-    st.session_state.resume_text = ""
 if "jd_text" not in st.session_state:
     st.session_state.jd_text = ""
 if "tracker_edit" not in st.session_state:
     st.session_state.tracker_edit = pd.DataFrame(
         [{"Company": "", "Role": "", "Date Applied": str(date.today()), "Status": "Pending"}] * 2
     )
+
+# Auto-load base resume once per session
+if "resume_text" not in st.session_state or not st.session_state.resume_text:
+    _base_text, _base_name = load_base_resume()
+    st.session_state.resume_text = _base_text
+    st.session_state.base_resume_name = _base_name
+else:
+    if "base_resume_name" not in st.session_state:
+        st.session_state.base_resume_name = ""
 
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -243,7 +296,7 @@ st.markdown("""
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown("# 📄 AI Resume Enhancer")
-st.caption("Upload your resume and JD — the AI extracts, analyses, and tailors automatically.")
+st.caption("Upload a JD — your base resume is loaded automatically from the base_resume/ folder.")
 st.divider()
 
 
@@ -282,35 +335,41 @@ with st.sidebar:
 col_resume, col_jd = st.columns(2)
 
 with col_resume:
-    st.subheader("📎 Your Resume")
-    resume_file = st.file_uploader(
-        "Upload resume",
-        type=["pdf", "docx", "txt"],
-        label_visibility="collapsed",
-        key="resume_upload",
-    )
+    st.subheader("📎 Base Resume")
 
-    if resume_file:
-        with st.spinner("Extracting resume text…"):
-            extracted = extract_text(resume_file)
-        if extracted:
-            st.session_state.resume_text = extracted
-            st.success(f"✅ Extracted {len(extracted.split())} words from **{resume_file.name}**")
-            with st.expander("Preview extracted text"):
-                st.text(extracted[:1500] + ("…" if len(extracted) > 1500 else ""))
-        else:
-            st.error("Could not extract text. Try a different file format.")
+    if st.session_state.resume_text:
+        name = st.session_state.base_resume_name or "manually entered"
+        st.success(f"✅ Loaded **{name}** from `base_resume/` folder ({len(st.session_state.resume_text.split())} words)")
+        with st.expander("Preview base resume"):
+            st.text(st.session_state.resume_text[:1500] + ("…" if len(st.session_state.resume_text) > 1500 else ""))
+        if st.button("🔄 Reload from base_resume/"):
+            _base_text, _base_name = load_base_resume()
+            if _base_text:
+                st.session_state.resume_text = _base_text
+                st.session_state.base_resume_name = _base_name
+                st.rerun()
+            else:
+                st.error("No resume file found in base_resume/ folder.")
+    else:
+        st.warning("⚠️ No resume found in `base_resume/` folder.")
+        st.caption("Place your resume (PDF, DOCX, or TXT) in a folder called `base_resume/` next to app.py, then restart the app.")
 
-    with st.expander("Or paste resume manually"):
-        manual_resume = st.text_area(
-            "Resume text",
+    with st.expander("Override: upload a different resume"):
+        resume_file = st.file_uploader(
+            "Upload resume",
+            type=["pdf", "docx", "txt"],
             label_visibility="collapsed",
-            placeholder="Paste your resume here as plain text…",
-            height=200,
-            key="manual_resume",
+            key="resume_upload",
         )
-        if manual_resume.strip():
-            st.session_state.resume_text = manual_resume
+        if resume_file:
+            with st.spinner("Extracting resume text…"):
+                extracted = extract_text(resume_file)
+            if extracted:
+                st.session_state.resume_text = extracted
+                st.session_state.base_resume_name = resume_file.name
+                st.success(f"✅ Using uploaded file: **{resume_file.name}**")
+            else:
+                st.error("Could not extract text. Try a different file format.")
 
 
 with col_jd:
@@ -375,7 +434,23 @@ if enhance_clicked:
     else:
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-        with st.spinner("Extracting key info and enhancing your resume…"):
+        with st.spinner("Step 1/2 — Cleaning and extracting JD…"):
+            try:
+                jd_response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": JD_EXTRACT_PROMPT},
+                        {"role": "user", "content": clean_jd_text(st.session_state.jd_text)},
+                    ],
+                    temperature=0.0,
+                    max_tokens=1000,
+                )
+                clean_jd = jd_response.choices[0].message.content.strip()
+            except Exception as e:
+                st.error(f"JD extraction failed: {e}")
+                clean_jd = clean_jd_text(st.session_state.jd_text)
+
+        with st.spinner("Step 2/2 — Enhancing your resume…"):
             try:
                 response = client.chat.completions.create(
                     model=model,
@@ -383,7 +458,7 @@ if enhance_clicked:
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": (
                             f"## Candidate Resume\n\n{st.session_state.resume_text}"
-                            f"\n\n---\n\n## Job Description\n\n{clean_jd_text(st.session_state.jd_text)}"
+                            f"\n\n---\n\n## Job Description\n\n{clean_jd}"
                         )},
                     ],
                     temperature=0.4,
