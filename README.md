@@ -48,8 +48,30 @@ Most resumes fail ATS (Applicant Tracking System) checks before a human ever rea
 
 1. Clone the repository
 2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `streamlit` | ≥1.35.0 | Web UI |
+| `openai` | ≥1.30.0 | AI API calls |
+| `pdfplumber` | ≥0.11.0 | Extract text from PDF resumes/JDs |
+| `python-docx` | ≥1.1.0 | Extract text from Word `.docx` files |
+| `fpdf2` | ≥2.7.9 | Export enhanced resume as PDF |
+| `pandas` | ≥2.0.0 | Application tracker |
+| `python-dotenv` | ≥1.0.0 | Load API key from `.env` file |
+
 3. Copy `.env.example` to `.env` and fill in your API key
+
 4. Run the application
+
+```bash
+streamlit run app.py
+```
+
+The app will open automatically in your browser at `http://localhost:8501`.
 
 ---
 
