@@ -32,12 +32,7 @@ def extract_text_from_docx(file) -> str:
     return "\n".join(paragraphs).strip()
 
 
-def extract_text_from_txt(file) -> str:
-    return file.read().decode("utf-8", errors="ignore").strip()
-
-
 def extract_text(uploaded_file) -> str:
-    """Route to correct extractor based on file type."""
     name = uploaded_file.name.lower()
     file_bytes = io.BytesIO(uploaded_file.read())
     if name.endswith(".pdf"):
@@ -47,11 +42,30 @@ def extract_text(uploaded_file) -> str:
     elif name.endswith(".txt"):
         file_bytes.seek(0)
         return file_bytes.read().decode("utf-8", errors="ignore").strip()
-    else:
-        return ""
+    return ""
 
 
 # ── PDF export ─────────────────────────────────────────────────────────────────
+def sanitise_for_pdf(text: str) -> str:
+    """Replace Unicode chars unsupported by Helvetica (latin-1 only)."""
+    replacements = {
+        "\u2013": "-",    # en dash
+        "\u2014": "-",    # em dash
+        "\u2012": "-",    # figure dash
+        "\u2015": "-",    # horizontal bar
+        "\u2018": "'",    # left single quote
+        "\u2019": "'",    # right single quote
+        "\u201c": '"',    # left double quote
+        "\u201d": '"',    # right double quote
+        "\u2022": "-",    # bullet
+        "\u2026": "...",  # ellipsis
+        "\u00a0": " ",    # non-breaking space
+    }
+    for char, replacement in replacements.items():
+        text = text.replace(char, replacement)
+    return text.encode("latin-1", errors="ignore").decode("latin-1")
+
+
 def generate_pdf(text: str) -> bytes:
     pdf = FPDF()
     pdf.add_page()
@@ -59,7 +73,10 @@ def generate_pdf(text: str) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=20)
 
     for line in text.split("\n"):
-        stripped = line.strip()
+        stripped = sanitise_for_pdf(line.strip())
+        if not stripped:
+            pdf.ln(3)
+            continue
         if stripped.isupper() and len(stripped) > 2:
             pdf.set_font("Helvetica", "B", 13)
             pdf.ln(3)
@@ -68,32 +85,78 @@ def generate_pdf(text: str) -> bytes:
             pdf.set_line_width(0.5)
             pdf.line(20, pdf.get_y(), 190, pdf.get_y())
             pdf.ln(2)
-        elif stripped.startswith(("-", "•", "*")):
+        elif stripped.startswith(("-", "*")):
             pdf.set_font("Helvetica", "", 10)
-            content = stripped.lstrip("-•* ").strip()
+            content = stripped.lstrip("-* ").strip()
             pdf.set_x(25)
-            pdf.cell(5, 6, "•", ln=False)
+            pdf.cell(5, 6, "-", ln=False)
             pdf.multi_cell(0, 6, content)
-        elif stripped and len(stripped) < 60 and not stripped.endswith("."):
+        elif len(stripped) < 60 and not stripped.endswith("."):
             pdf.set_font("Helvetica", "B", 10)
             pdf.cell(0, 6, stripped, ln=True)
-        elif stripped:
+        else:
             pdf.set_font("Helvetica", "", 10)
             pdf.multi_cell(0, 6, stripped)
-        else:
-            pdf.ln(3)
 
     return bytes(pdf.output())
 
 
 # ── JD helpers ─────────────────────────────────────────────────────────────────
 def guess_company(jd: str) -> str:
-    m = re.search(r'(?:at|@|about\s+)([A-Z][A-Za-z0-9&\s.,\']+?)(?:\n|,|\.|\s+is\s|\s+are\s)', jd)
+    m = re.search(r"(?:at|@|about\s+)([A-Z][A-Za-z0-9&\s.,\']+?)(?:\n|,|\.|\s+is\s|\s+are\s)", jd)
     return m.group(1).strip()[:50] if m else ""
 
+
 def guess_role(jd: str) -> str:
-    m = re.search(r'(?:role|position|title|hiring(?:\s+a[n]?)?)[\s:]+([A-Za-z\s\/\-]+?)(?:\n|,|\.|\s+at\s)', jd, re.I)
+    m = re.search(r"(?:role|position|title|hiring(?:\s+a[n]?)?)[\s:]+([A-Za-z\s\/\-]+?)(?:\n|,|\.|\s+at\s)", jd, re.I)
     return m.group(1).strip()[:60] if m else ""
+
+
+def clean_jd_text(raw: str) -> str:
+    """Strip boilerplate scraped from job portals before sending to the AI."""
+    noise_patterns = [
+        r"(?i)by continuing to use our platform",
+        r"(?i)open app",
+        r"(?i)privacy policy",
+        r"(?i)cookie.*consent",
+        r"(?i)your application will include",
+        r"(?i)employer questions",
+        r"(?i)registration no\.",
+        r"(?i)\bEA No\b",
+        r"(?i)company information",
+        r"(?i)view all jobs",
+        r"(?i)full time.*per month",
+        r"(?i)part time.*per month",
+        r"(?i)\$[\d,]+\s*[-\u2013]\s*\$[\d,]+\s*per\s*(month|year|hour)",
+        r"(?i)posted \d+\w* ago",
+        r"(?i)medium application volume",
+        r"(?i)high application volume",
+        r"(?i)low application volume",
+        r"(?i)benefits.*allowance",
+        r"(?i)variable bonus",
+        r"(?i)apply now",
+        r"(?i)quick apply",
+        r"(?i)save job",
+        r"(?i)report job",
+        r"(?i)share this job",
+        r"(?i)similar jobs",
+        r"(?i)you might also like",
+        r"(?i)javascript is disabled",
+        r"(?i)(central|north|south|east|west) region",
+    ]
+    cleaned = []
+    for line in raw.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            cleaned.append("")
+            continue
+        skip = any(re.search(p, stripped) for p in noise_patterns)
+        if not skip:
+            cleaned.append(stripped)
+
+    # Collapse 3+ consecutive blank lines to 2
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned))
+    return result.strip()
 
 
 # ── System prompt ──────────────────────────────────────────────────────────────
@@ -120,9 +183,19 @@ You will receive a candidate's resume and a job description. Your job is to:
    - Use strong action verbs (led, built, reduced, drove, optimised, delivered)
    - Quantify achievements where the original data supports it
    - Bullet points in result-first or STAR format
-   - Summary: 3–5 lines tightly matched to the JD
+   - Summary: 3-5 lines tightly matched to the JD
 
-Output ONLY the enhanced resume as plain text — no preamble, no commentary, no markdown fences."""
+IMPORTANT: The job description may contain scraped noise such as cookie banners, salary info, \
+EA registration numbers, platform UI text, apply buttons, or unrelated job listings. \
+IGNORE all such noise and focus only on the actual role title, responsibilities, and requirements.
+
+OUTPUT RULES — strictly enforced:
+- Output ONLY the resume content itself. Nothing else.
+- Do NOT include any introductory sentence, closing remark, or commentary of any kind.
+- Do NOT include lines like "This resume has been tailored to...", "Note:", "I have updated...", or any explanation.
+- Do NOT include markdown formatting or code fences of any kind.
+- The very first character of your response must be the start of the resume (e.g. the candidate's name).
+- The very last character must be the end of the resume content. Nothing after it."""
 
 
 # ── Session state ──────────────────────────────────────────────────────────────
@@ -163,11 +236,6 @@ st.markdown("""
         font-family: 'DM Mono', monospace; font-size: 13px;
         line-height: 1.8; white-space: pre-wrap; min-height: 200px;
         background: transparent; color: #bbb5ad;
-    }
-    .extract-preview {
-        border-radius: 8px; padding: 0.6rem 0.9rem;
-        font-size: 12px; font-family: monospace;
-        line-height: 1.6; max-height: 180px; overflow-y: auto;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -233,7 +301,6 @@ with col_resume:
         else:
             st.error("Could not extract text. Try a different file format.")
 
-    # Fallback: manual paste
     with st.expander("Or paste resume manually"):
         manual_resume = st.text_area(
             "Resume text",
@@ -259,14 +326,18 @@ with col_jd:
         with st.spinner("Extracting JD text…"):
             extracted_jd = extract_text(jd_file)
         if extracted_jd:
-            st.session_state.jd_text = extracted_jd
-            st.success(f"✅ Extracted {len(extracted_jd.split())} words from **{jd_file.name}**")
-            with st.expander("Preview extracted text"):
-                st.text(extracted_jd[:1500] + ("…" if len(extracted_jd) > 1500 else ""))
+            cleaned_jd = clean_jd_text(extracted_jd)
+            st.session_state.jd_text = cleaned_jd
+            removed = len(extracted_jd.split()) - len(cleaned_jd.split())
+            st.success(
+                f"✅ Extracted {len(cleaned_jd.split())} words from **{jd_file.name}**" +
+                (f" ({removed} words of boilerplate removed)" if removed > 0 else "")
+            )
+            with st.expander("Preview cleaned JD text"):
+                st.text(cleaned_jd[:1500] + ("…" if len(cleaned_jd) > 1500 else ""))
         else:
             st.error("Could not extract text. Try a different file format.")
 
-    # Fallback: manual paste
     with st.expander("Or paste JD manually"):
         manual_jd = st.text_area(
             "JD text",
@@ -312,7 +383,7 @@ if enhance_clicked:
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": (
                             f"## Candidate Resume\n\n{st.session_state.resume_text}"
-                            f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
+                            f"\n\n---\n\n## Job Description\n\n{clean_jd_text(st.session_state.jd_text)}"
                         )},
                     ],
                     temperature=0.4,
@@ -321,13 +392,11 @@ if enhance_clicked:
                 enhanced = response.choices[0].message.content.strip()
                 st.session_state.enhanced_resume = enhanced
 
-                # Save txt to folder
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
                 filepath = Path(output_dir) / f"enhanced_{date.today().isoformat()}.txt"
                 filepath.write_text(enhanced, encoding="utf-8")
                 st.success(f"✅ Saved to `{filepath}`")
 
-                # Auto-log to tracker
                 company = guess_company(st.session_state.jd_text)
                 role    = guess_role(st.session_state.jd_text)
                 if company or role:
