@@ -37,6 +37,10 @@ Most resumes fail ATS (Applicant Tracking System) checks before a human ever rea
 
 **Libraries**
 - `python-dotenv`
+- `python-docx`
+- `pdfplumber`
+- `fpdf2`
+- `pandas`
 - `streamlit`
 
 **API**
