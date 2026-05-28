@@ -7,6 +7,9 @@ from datetime import date, datetime
 from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from fpdf import FPDF
 import pdfplumber
 from docx import Document
@@ -48,21 +51,29 @@ def load_tracker_from_supabase() -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["Company", "Role", "Date Applied", "Status", "id"])
 
-def insert_to_supabase(company: str, role: str, date_applied: str, status: str) -> str | None:
-    """Insert a new row, return the new row id or None on failure."""
+def insert_to_supabase(company: str, role: str, date_applied, status: str) -> tuple[str | None, str | None]:
+    """Insert a new row. Returns (id, error_message)."""
     sb = get_supabase()
     if not sb:
-        return None
+        return None, "Supabase client not initialised — check SUPABASE_URL and SUPABASE_ANON_KEY in .env"
     try:
+        # Ensure date is a plain YYYY-MM-DD string
+        if hasattr(date_applied, "strftime"):
+            date_applied = date_applied.strftime("%Y-%m-%d")
+        else:
+            date_applied = str(date_applied)[:10]
+
         res = sb.table("applications").insert({
-            "company":      company,
-            "role":         role,
+            "company":      str(company),
+            "role":         str(role),
             "date_applied": date_applied,
-            "status":       status,
+            "status":       str(status),
         }).execute()
-        return res.data[0]["id"] if res.data else None
-    except Exception:
-        return None
+        if res.data:
+            return res.data[0]["id"], None
+        return None, "Insert returned no data — check table permissions in Supabase"
+    except Exception as e:
+        return None, str(e)
 
 def update_supabase_row(row_id: str, company: str, role: str, date_applied: str, status: str):
     sb = get_supabase()
@@ -1185,17 +1196,19 @@ with st.expander("💾 Select & save entry to Supabase", expanded=False):
         st.info(f"📋 **Will save:** Company: **{new_company}** | Role: **{new_role}** | Date: **{new_date}** | Status: **{new_status}**")
 
         if st.button("✅ Confirm & Save to Supabase", use_container_width=False):
-            row_id = insert_to_supabase(new_company, new_role, str(new_date), new_status)
-            # Update selected row in session with confirmed + returned id
-            idx = df_session.index[selected_idx]
-            st.session_state.tracker_edit.at[idx, "Company"]      = new_company
-            st.session_state.tracker_edit.at[idx, "Role"]         = new_role
-            st.session_state.tracker_edit.at[idx, "Date Applied"] = str(new_date)
-            st.session_state.tracker_edit.at[idx, "Status"]       = new_status
-            if "id" in st.session_state.tracker_edit.columns and row_id:
-                st.session_state.tracker_edit.at[idx, "id"]       = row_id
-            st.success(f"✅ Saved to Supabase: {new_company} — {new_role}")
-            st.rerun()
+            row_id, err = insert_to_supabase(new_company, new_role, new_date, new_status)
+            if err:
+                st.error(f"❌ Supabase insert failed: {err}")
+            else:
+                idx = df_session.index[selected_idx]
+                st.session_state.tracker_edit.at[idx, "Company"]      = new_company
+                st.session_state.tracker_edit.at[idx, "Role"]         = new_role
+                st.session_state.tracker_edit.at[idx, "Date Applied"] = str(new_date)
+                st.session_state.tracker_edit.at[idx, "Status"]       = new_status
+                if "id" in st.session_state.tracker_edit.columns and row_id:
+                    st.session_state.tracker_edit.at[idx, "id"]       = row_id
+                st.success(f"✅ Saved to Supabase: {new_company} — {new_role}")
+                st.rerun()
 
 # ── Tracker table ──
 # Build display df with entry number, hide internal id
@@ -1242,13 +1255,70 @@ if not edited_no_num.equals(display_no_num):
         edited_with_id["id"] = st.session_state.tracker_edit["id"].reindex(edited_no_num.index).values
     st.session_state.tracker_edit = edited_with_id
 
+def export_to_excel(df: pd.DataFrame) -> bytes:
+    """Export tracker to formatted Excel with auto-fitted columns."""
+    export_df = df.drop(columns=["#"], errors="ignore").copy()
+
+    output = io.BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Application Tracker"
+
+    # ── Header style ──
+    header_fill   = PatternFill("solid", fgColor="2D5A3D")
+    header_font   = Font(bold=True, color="FFFFFF", size=11)
+    header_align  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_border   = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin")
+    )
+
+    # Write headers
+    for col_idx, col_name in enumerate(export_df.columns, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font   = header_font
+        cell.fill   = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+    ws.row_dimensions[1].height = 20
+
+    # Write data rows
+    row_alt_fill = PatternFill("solid", fgColor="E8F2EB")
+    for row_idx, row in enumerate(export_df.itertuples(index=False), start=2):
+        for col_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=str(value) if value is not None else "")
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            cell.border = thin_border
+            if row_idx % 2 == 0:
+                cell.fill = row_alt_fill
+        ws.row_dimensions[row_idx].height = 18
+
+    # ── Auto-fit column widths ──
+    for col_idx, col_name in enumerate(export_df.columns, start=1):
+        col_letter = get_column_letter(col_idx)
+        # Measure max content length in this column
+        max_len = len(str(col_name))
+        for row in export_df[col_name].astype(str):
+            for line in str(row).split("\n"):
+                max_len = max(max_len, len(line))
+        # Cap at 60 chars width, minimum 12
+        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 60)
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+    wb.save(output)
+    return output.getvalue()
+
+
 col_exp, _ = st.columns([1, 5])
 with col_exp:
+    excel_bytes = export_to_excel(edited)
     st.download_button(
-        label="⬇ Export CSV",
-        data=edited.drop(columns=["#"], errors="ignore").to_csv(index=False).encode("utf-8"),
-        file_name=f"applications_{date.today().isoformat()}.csv",
-        mime="text/csv",
+        label="⬇ Export Excel",
+        data=excel_bytes,
+        file_name=f"applications_{date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
 
