@@ -434,6 +434,8 @@ if "baseline_ats_result" not in st.session_state:
     st.session_state.baseline_ats_result = None
 if "enhance_count" not in st.session_state:
     st.session_state.enhance_count = 0
+if "is_enhancing" not in st.session_state:
+    st.session_state.is_enhancing = False
 if "tracker_edit" not in st.session_state:
     st.session_state.tracker_edit = load_tracker_from_supabase()
 if "supabase_ok" not in st.session_state:
@@ -605,19 +607,29 @@ with col_jd:
 
     # ── Editable JD preview — always shown once JD is loaded ──
     if st.session_state.jd_editable_value:
-        st.caption("✏️ Edit below to correct company name, job role, or any missing info before enhancing.")
-        # Key includes widget version — changes on new upload, forcing widget reset
         widget_key = f"jd_editable_{st.session_state.jd_widget_version}"
-        edited_jd = st.text_area(
-            "Extracted JD (editable)",
-            label_visibility="collapsed",
-            value=st.session_state.jd_editable_value,
-            height=250,
-            key=widget_key,
-            help="Edit this directly — corrections here will be used for enhancement and will auto-fill the tracker.",
-        )
-        st.session_state.jd_text = edited_jd
-        st.session_state.jd_editable_value = edited_jd
+        if st.session_state.is_enhancing:
+            st.caption("🔒 JD locked during enhancement.")
+            st.text_area(
+                "Extracted JD (editable)",
+                label_visibility="collapsed",
+                value=st.session_state.jd_editable_value,
+                height=250,
+                key=widget_key + "_locked",
+                disabled=True,
+            )
+        else:
+            st.caption("✏️ Edit below to correct company name, job role, or any missing info before enhancing.")
+            edited_jd = st.text_area(
+                "Extracted JD (editable)",
+                label_visibility="collapsed",
+                value=st.session_state.jd_editable_value,
+                height=250,
+                key=widget_key,
+                help="Edit this directly — corrections here will be used for enhancement and will auto-fill the tracker.",
+            )
+            st.session_state.jd_text = edited_jd
+            st.session_state.jd_editable_value = edited_jd
 
     # Only show manual paste if no file has been uploaded yet
     if not st.session_state.jd_editable_value:
@@ -657,6 +669,7 @@ if enhance_clicked:
     elif not st.session_state.jd_text.strip():
         st.error("Please upload a job description or paste one manually.")
     else:
+        st.session_state.is_enhancing = True
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
         with st.spinner("Step 1/3 — Scoring baseline resume against JD…"):
@@ -692,10 +705,18 @@ if enhance_clicked:
                     f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
                 )
 
-                # Try up to 2 times — retry if output is too similar to baseline
+                # Try up to 3 times:
+                # - Retry if output too similar to baseline
+                # - Retry if ATS score regressed vs baseline
                 enhanced = None
-                for attempt in range(2):
-                    temp = 0.7 if attempt == 0 else 0.9
+                baseline_total = None
+                if st.session_state.baseline_ats_result:
+                    _m = re.search(r"TOTAL_SCORE:\s*([\d.]+)", st.session_state.baseline_ats_result)
+                    if _m:
+                        baseline_total = float(_m.group(1))
+
+                for attempt in range(3):
+                    temp = [0.7, 0.85, 0.9][attempt]
                     response = client.chat.completions.create(
                         model=model,
                         messages=[
@@ -707,11 +728,43 @@ if enhance_clicked:
                     )
                     candidate = response.choices[0].message.content.strip()
                     sim = similarity_ratio(st.session_state.resume_text, candidate)
-                    # Accept if similarity is below 80% or it's the last attempt
-                    if sim < 0.80 or attempt == 1:
+
+                    # Quick ATS check on this candidate to see if it regressed
+                    candidate_score = None
+                    if baseline_total is not None:
+                        try:
+                            _quick = client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[
+                                    {"role": "system", "content": ATS_SCORE_PROMPT},
+                                    {"role": "user", "content": (
+                                        f"## Enhanced Resume\n\n{candidate}"
+                                        f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
+                                    )},
+                                ],
+                                temperature=0.1,
+                                max_tokens=600,
+                            )
+                            _qraw = _quick.choices[0].message.content.strip()
+                            _qm = re.search(r"TOTAL_SCORE:\s*([\d.]+)", _qraw)
+                            if _qm:
+                                candidate_score = float(_qm.group(1))
+                        except Exception:
+                            pass
+
+                    score_regressed = (
+                        baseline_total is not None and
+                        candidate_score is not None and
+                        candidate_score < baseline_total
+                    )
+
+                    # Accept if: good similarity change AND score not regressed, or last attempt
+                    if attempt == 2 or (sim < 0.80 and not score_regressed):
                         enhanced = candidate
                         if sim >= 0.80:
-                            st.warning(f"⚠️ Enhancement is very similar to your baseline (similarity: {sim:.0%}). This may mean the JD has too little content or your resume is already well-matched.")
+                            st.warning(f"⚠️ Enhancement is very similar to baseline ({sim:.0%} similarity). The JD may have too little content to drive significant changes.")
+                        elif score_regressed:
+                            st.warning(f"⚠️ Best available enhancement selected after {attempt+1} attempt(s). Score could not be improved beyond baseline on this run.")
                         break
 
                 st.session_state.enhanced_resume = enhanced
@@ -805,6 +858,8 @@ if enhance_clicked:
                 st.error("Rate limit hit. Please wait a moment and try again.")
             except Exception as e:
                 st.error(f"Error: {e}")
+            finally:
+                st.session_state.is_enhancing = False
 
 
 # ── Output ─────────────────────────────────────────────────────────────────────
@@ -1066,51 +1121,80 @@ def get_latest_tracker_defaults() -> dict:
         "status":  str(last.get("Status", "Not Applied") or "Not Applied"),
     }
 
-with st.expander("➕ Review & save application entry to database", expanded=False):
-    st.caption("Pre-filled from the latest tracker entry. Review and correct before saving to Supabase.")
+with st.expander("💾 Select & save entry to Supabase", expanded=False):
+    st.caption("Select which session entry to save. Delete unwanted rows first, then pick the one to push to Supabase.")
 
-    defaults = get_latest_tracker_defaults()
+    df_session = st.session_state.tracker_edit
+    if df_session.empty:
+        st.info("No entries yet — enhance a resume first to generate tracker entries.")
+    else:
+        # Build selection labels from session rows
+        session_labels = []
+        for i, row in df_session.iterrows():
+            session_labels.append(
+                f"#{i+1} — {row.get('Company','NA')} | {row.get('Role','NA')} | {row.get('Date Applied','')}"
+            )
 
-    c1, c2 = st.columns(2)
-    with c1:
-        new_company = st.text_input(
-            "Company",
-            value=defaults["company"],
-            key="new_company",
-            help="Edit if the auto-extracted company name is wrong or NA.",
+        selected_label = st.selectbox(
+            "Select entry to save:",
+            options=session_labels,
+            index=len(session_labels) - 1,  # Default to latest
+            key="save_row_select",
         )
-        new_role = st.text_input(
-            "Role",
-            value=defaults["role"],
-            key="new_role",
-            help="Edit if the auto-extracted role is wrong or NA.",
-        )
-    with c2:
-        new_date   = st.date_input("Date Applied", value=date.today(), key="new_date")
-        new_status = st.selectbox(
-            "Status",
-            STATUS_OPTIONS,
-            index=STATUS_OPTIONS.index(defaults["status"]) if defaults["status"] in STATUS_OPTIONS else 0,
-            key="new_status",
-        )
+        selected_idx = session_labels.index(selected_label)
+        selected_row = df_session.iloc[selected_idx]
 
-    st.info(f"📋 **Review before saving:** Company: **{new_company}** | Role: **{new_role}** | Date: **{new_date}** | Status: **{new_status}**")
+        # Delete row button
+        col_del, col_spacer = st.columns([1, 5])
+        with col_del:
+            if st.button("🗑️ Delete this entry", use_container_width=True):
+                st.session_state.tracker_edit = df_session.drop(
+                    index=df_session.index[selected_idx]
+                ).reset_index(drop=True)
+                st.rerun()
 
-    col_save, col_cancel = st.columns([1, 5])
-    with col_save:
-        if st.button("✅ Confirm & Save to Supabase", use_container_width=True):
+        st.divider()
+        st.markdown("**Review & edit before saving:**")
+        c1, c2 = st.columns(2)
+        with c1:
+            new_company = st.text_input(
+                "Company",
+                value=str(selected_row.get("Company", "NA") or "NA"),
+                key="new_company",
+            )
+            new_role = st.text_input(
+                "Role",
+                value=str(selected_row.get("Role", "NA") or "NA"),
+                key="new_role",
+            )
+        with c2:
+            _date_val = selected_row.get("Date Applied", str(date.today()))
+            try:
+                _date_val = pd.to_datetime(_date_val).date()
+            except Exception:
+                _date_val = date.today()
+            new_date = st.date_input("Date Applied", value=_date_val, key="new_date")
+            _status_val = str(selected_row.get("Status", "Not Applied") or "Not Applied")
+            new_status = st.selectbox(
+                "Status",
+                STATUS_OPTIONS,
+                index=STATUS_OPTIONS.index(_status_val) if _status_val in STATUS_OPTIONS else 0,
+                key="new_status",
+            )
+
+        st.info(f"📋 **Will save:** Company: **{new_company}** | Role: **{new_role}** | Date: **{new_date}** | Status: **{new_status}**")
+
+        if st.button("✅ Confirm & Save to Supabase", use_container_width=False):
             row_id = insert_to_supabase(new_company, new_role, str(new_date), new_status)
-            # Update the latest matching row in session state with confirmed data
-            df = st.session_state.tracker_edit
-            if not df.empty:
-                last_idx = df.index[-1]
-                st.session_state.tracker_edit.at[last_idx, "Company"]      = new_company
-                st.session_state.tracker_edit.at[last_idx, "Role"]         = new_role
-                st.session_state.tracker_edit.at[last_idx, "Date Applied"] = str(new_date)
-                st.session_state.tracker_edit.at[last_idx, "Status"]       = new_status
-                if "id" in st.session_state.tracker_edit.columns and row_id:
-                    st.session_state.tracker_edit.at[last_idx, "id"]       = row_id
-            st.success("✅ Saved to Supabase.")
+            # Update selected row in session with confirmed + returned id
+            idx = df_session.index[selected_idx]
+            st.session_state.tracker_edit.at[idx, "Company"]      = new_company
+            st.session_state.tracker_edit.at[idx, "Role"]         = new_role
+            st.session_state.tracker_edit.at[idx, "Date Applied"] = str(new_date)
+            st.session_state.tracker_edit.at[idx, "Status"]       = new_status
+            if "id" in st.session_state.tracker_edit.columns and row_id:
+                st.session_state.tracker_edit.at[idx, "id"]       = row_id
+            st.success(f"✅ Saved to Supabase: {new_company} — {new_role}")
             st.rerun()
 
 # ── Tracker table ──
