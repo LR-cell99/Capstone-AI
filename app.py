@@ -338,19 +338,45 @@ STRICT OUTPUT RULES:
 
 
 # ── ATS scoring prompt ────────────────────────────────────────────────────────
-ATS_SCORE_PROMPT = """You are a strict ATS (Applicant Tracking System) evaluator specialised in the Singapore job market and SkillsFuture Singapore frameworks.
+ATS_SCORE_PROMPT = """You are a brutally honest ATS (Applicant Tracking System) evaluator for the Singapore job market.
 
-You will receive a resume and the job description it was evaluated against.
-Score the resume honestly and critically out of 100. Do not inflate scores — a resume that only loosely matches the JD should score in the 40-60 range.
+You will receive a resume and a job description. Score the resume out of 100.
 
-Scoring breakdown (total 100):
-- Keyword Match (30 pts): Exact and semantically similar JD keywords present in the resume, including SkillsFuture Singapore skill terminology. Deduct heavily for missing critical JD keywords.
-- Relevance of Experience (25 pts): How directly the candidate's actual experience maps to the role's day-to-day responsibilities. Generic or loosely related experience scores low.
-- Qualifications Match (20 pts): Education, certifications, and years of experience vs JD requirements. Missing required qualifications is a significant deduction.
-- Resume Clarity & Structure (15 pts): Strong action verbs, quantified achievements, concise bullets, professional summary present and targeted. Vague or passive language scores low.
-- ATS Formatting Compliance (10 pts): Plain text, no tables/columns/special characters, standard section headers, consistent date formatting.
+SCORING RULES — read carefully before scoring:
+- There is NO minimum score. A poor match can score 20, 30, or 40. Do not anchor to 60.
+- 60+ is a PASS and means the resume genuinely addresses the core role requirements.
+- Below 60 is a FAIL and is expected when the resume is a weak or moderate match.
+- Score what is actually in the resume — not what could be there or what you assume.
+- Do NOT give benefit of the doubt. If a keyword is absent, deduct for it. If experience is vague, deduct for it.
 
-Be honest. If the resume is a weak match for the JD, score it accordingly. A passing score (60+) should only be given when the resume genuinely addresses the core requirements.
+SCORING BREAKDOWN (total 100):
+- Keyword Match (30 pts):
+  * Count how many critical JD keywords and SkillsFuture Singapore skill terms appear in the resume.
+  * Missing more than half the critical keywords = 0-10 pts.
+  * Most keywords present but loosely = 11-20 pts.
+  * Strong keyword alignment = 21-30 pts.
+
+- Relevance of Experience (25 pts):
+  * Score 0-8 if experience is in a different field or only loosely related.
+  * Score 9-16 if some experience is relevant but gaps are significant.
+  * Score 17-25 if experience directly maps to the role responsibilities.
+
+- Qualifications Match (20 pts):
+  * Missing required degree/certification = deduct 10+ pts immediately.
+  * Wrong field of study for a technical role = deduct 8 pts.
+  * Meets all requirements = 17-20 pts.
+
+- Resume Clarity & Structure (15 pts):
+  * Vague bullets with no action verbs or results = 0-5 pts.
+  * Some strong language but inconsistent = 6-10 pts.
+  * Consistently strong action verbs, quantified results, targeted summary = 11-15 pts.
+
+- ATS Formatting Compliance (10 pts):
+  * Standard plain text, clean headers, consistent dates = 8-10 pts.
+  * Minor issues = 5-7 pts.
+  * Tables, columns, special characters = 0-4 pts.
+
+TOTAL_SCORE must equal the sum of all five category scores exactly.
 
 Respond ONLY in this exact format — no extra text before or after:
 
@@ -360,8 +386,8 @@ RELEVANCE_OF_EXPERIENCE: <number>/25
 QUALIFICATIONS_MATCH: <number>/20
 RESUME_CLARITY: <number>/15
 ATS_FORMATTING: <number>/10
-SUMMARY: <2-3 sentences on key strengths and the single biggest gap holding the score back>
-IMPROVEMENTS: <3 specific, actionable bullet points to improve the ATS score — reference actual missing keywords or JD requirements>"""
+SUMMARY: <2-3 sentences stating the score honestly — name the biggest weaknesses specifically, not generically>
+IMPROVEMENTS: <3 specific actionable bullet points referencing exact missing keywords or requirements from the JD>"""
 
 
 # ── Session state ──────────────────────────────────────────────────────────────
@@ -588,8 +614,8 @@ if enhance_clicked:
                             f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
                         )},
                     ],
-                    temperature=0.0,
-                    max_tokens=500,
+                    temperature=0.1,
+                    max_tokens=600,
                 )
                 st.session_state.baseline_ats_result = baseline_ats_resp.choices[0].message.content.strip()
             except Exception:
@@ -629,8 +655,8 @@ if enhance_clicked:
                                     f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
                                 )},
                             ],
-                            temperature=0.0,
-                            max_tokens=500,
+                            temperature=0.1,
+                            max_tokens=600,
                         )
                         st.session_state.ats_result = ats_response.choices[0].message.content.strip()
                     except Exception:
@@ -817,6 +843,33 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ── Debug panel ────────────────────────────────────────────────────────────────
+with st.expander("🔍 Debug — verify ATS inputs & raw scores", expanded=False):
+    st.markdown("**What was sent to baseline ATS scorer:**")
+    if st.session_state.get("resume_text"):
+        st.text(st.session_state.resume_text[:800] + ("…" if len(st.session_state.resume_text) > 800 else ""))
+    else:
+        st.caption("No baseline resume in session.")
+
+    st.markdown("**What was sent to enhanced ATS scorer:**")
+    if st.session_state.get("enhanced_resume"):
+        st.text(st.session_state.enhanced_resume[:800] + ("…" if len(st.session_state.enhanced_resume) > 800 else ""))
+    else:
+        st.caption("No enhanced resume in session.")
+
+    st.markdown("**Raw baseline ATS response:**")
+    st.code(st.session_state.baseline_ats_result or "None", language="text")
+
+    st.markdown("**Raw enhanced ATS response:**")
+    st.code(st.session_state.ats_result or "None", language="text")
+
+    st.markdown("**Are baseline and enhanced resume identical?**")
+    same = st.session_state.get("resume_text","") == st.session_state.get("enhanced_resume","")
+    if same:
+        st.error("⚠️ YES — the enhanced resume is identical to the baseline. The enhancer may not have run correctly.")
+    else:
+        st.success("✅ No — the enhanced resume differs from the baseline.")
+
 
 # ── Application Tracker ────────────────────────────────────────────────────────
 st.divider()
@@ -913,7 +966,7 @@ with col_exp:
         use_container_width=True,
     )
 
-if st.session_state.supabase_ok:
+if SUPABASE_URL and SUPABASE_ANON_KEY:
     st.caption("✅ Connected to Supabase — entries saved automatically.")
 else:
-    st.caption("⚠️ Supabase not connected — entries stored in session only.")
+    st.caption("⚠️ Supabase not configured — add SUPABASE_URL and SUPABASE_ANON_KEY to .env")
