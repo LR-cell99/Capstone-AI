@@ -188,75 +188,107 @@ def clean_jd_text(raw: str) -> str:
 
 
 # ── System prompt ──────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are an expert resume writer and ATS optimisation specialist.
+SYSTEM_PROMPT = """You are a professional resume writer and ATS optimisation specialist for the Singapore job market.
 
-You will receive a candidate's resume and a job description. Your job is to:
+You will receive a candidate's ORIGINAL resume and a CLEANED job description.
+Your task is to produce a meaningfully rewritten resume — not a light touch-up.
 
-1. EXTRACT from the resume:
-   - Candidate name, contact info, summary
-   - All work experience (company, title, dates, responsibilities, achievements)
-   - Skills (technical and soft)
-   - Education and certifications
+STEP 1 — ANALYSE
+- Read every bullet point, sentence, and skill in the original resume carefully.
+- Identify every keyword, skill term, and requirement in the job description.
+- Note the gaps: what JD keywords are missing from the resume? What existing resume content can be reframed to address them?
 
-2. EXTRACT from the job description:
-   - Role title and key responsibilities
-   - Required and preferred skills/qualifications
-   - Keywords and phrases used repeatedly
-   - Seniority level and culture signals
+STEP 2 — REWRITE (this must be a substantial rewrite, not cosmetic)
+- REWRITE the professional summary completely — it must directly mirror the JD's language and priorities.
+- REWRITE every bullet point under work experience:
+  * Replace vague or passive language with strong action verbs (led, engineered, implemented, reduced, optimised, delivered, collaborated, troubleshot, calibrated, validated, etc.)
+  * Reframe existing responsibilities using the exact terminology and keywords from the JD wherever truthful
+  * Add quantification where the original supports it (e.g. "maintained equipment" → "maintained and troubleshot 12 production-line machines, reducing downtime by identifying recurring fault patterns")
+  * Structure bullets in result-first or STAR format
+- REWRITE the skills section: reorder and reword skills to match JD terminology exactly. If the candidate lists "machine maintenance" and the JD says "preventive maintenance", use "preventive maintenance".
+- Keep all section headers, education, and contact info intact.
 
-3. REWRITE the resume tailored to the JD:
-   - Preserve the same section structure
-   - NEVER invent or hallucinate skills, roles, or achievements
-   - Weave JD keywords naturally into bullet points and summary
-   - Use strong action verbs (led, built, reduced, drove, optimised, delivered)
-   - Quantify achievements where the original data supports it
-   - Bullet points in result-first or STAR format
-   - Summary: 3-5 lines tightly matched to the JD
-
-IMPORTANT: The job description may contain scraped noise such as cookie banners, salary info, \
-EA registration numbers, platform UI text, apply buttons, or unrelated job listings. \
-IGNORE all such noise and focus only on the actual role title, responsibilities, and requirements.
+HALLUCINATION RULES — strictly enforced:
+- NEVER add a skill, tool, technology, certification, or experience the candidate does not already have.
+- NEVER invent metrics or numbers not supported by the original resume.
+- You may REFRAME and REWORD existing experience using JD language — this is not hallucination.
+- You may REORDER content to put the most JD-relevant experience first.
 
 OUTPUT RULES — strictly enforced:
-- Output ONLY the resume content itself. Nothing else.
-- Do NOT include any introductory sentence, closing remark, or commentary of any kind.
-- Do NOT include lines like "This resume has been tailored to...", "Note:", "I have updated...", or any explanation.
-- Do NOT include markdown formatting or code fences of any kind.
-- The very first character of your response must be the start of the resume (e.g. the candidate's name).
-- The very last character must be the end of the resume content. Nothing after it."""
+- Output ONLY the resume content. No introductory sentence, no closing remark, no commentary, no notes.
+- Do NOT output lines like "This resume has been tailored...", "Note:", "I have updated...", or any explanation.
+- Do NOT use markdown formatting or code fences.
+- The very first character must be the candidate's name. The very last character must be the end of the resume."""
 
 
 # ── JD extraction prompt ──────────────────────────────────────────────────────
-JD_EXTRACT_PROMPT = """You are a job description parser. You will receive raw text scraped from a job portal.
-It will contain noise: cookie banners, salary ranges, EA/registration numbers, recruiter labels, portal UI elements, application instructions, and unrelated job listings.
+JD_EXTRACT_PROMPT = """You are a strict job description parser. You will receive raw text scraped from a Singapore job portal.
+The text is heavily polluted with noise. Your ONLY job is to extract what a hiring manager actually wrote.
 
-Your job is to extract ONLY the following from the actual job posting itself:
+WHAT TO EXTRACT (only these, nothing else):
+1. Company name — the actual employer. NOT a recruiter agency, NOT an applicant badge.
+   Recruiter agencies (e.g. "Inter Island Manpower", "RecruitFirst", "Adecco") are NOT the company.
+   Applicant labels (e.g. "Strong applicant", "Top applicant", "Good match") are NOT the company.
+   If you are not 100% certain of the real company name, output nothing for this field.
 
-1. Company name
-   - This must be the actual hiring company or organisation, NOT a recruiter label, applicant status tag, or portal badge.
-   - Examples of things that are NOT company names: "Strong applicant", "Top applicant", "Inter Island Manpower", "Quick apply", "Active today"
-   - If you cannot confidently identify the real company name, leave this blank — do not guess.
+2. Job title — the actual role being hired for.
 
-2. Job title / role
+3. About the company — only if a genuine employer description exists. Skip if absent.
 
-3. About the company
-   - Only include if there is a genuine company description in the JD.
-   - Do NOT include recruiter agency descriptions.
+4. Key responsibilities — what the person in this role will actually do day-to-day.
 
-4. Key responsibilities and duties
+5. Required qualifications and skills — hard requirements stated in the JD.
 
-5. Required qualifications and skills
+6. Preferred qualifications — nice-to-haves or bonus skills.
 
-6. Preferred / nice-to-have qualifications
+7. Anything else the hiring manager wrote that is directly relevant to performing this role.
 
-7. Any other content directly relevant to performing the role
+WHAT TO STRIP — remove every single one of these, even partial mentions:
+- Salary, pay range, allowances, bonuses, CPF, AWS, OT pay, benefits of any kind
+- EA licence numbers, UEN/registration numbers, company registration details
+- Application instructions ("Click apply", "Send resume to", "Your application will include")
+- Employer questions or screening questions
+- Cookie consent, privacy policy, platform terms
+- Portal UI elements ("Open app", "Save job", "Report job", "Quick apply", "View all jobs")
+- Applicant status tags ("Strong applicant", "Medium application volume", "Posted 5h ago")
+- Recruiter agency boilerplate or descriptions
+- Unrelated job listings or "similar jobs" sections
+- Navigation elements, breadcrumbs, region tags ("Central Region", "Full time")
+- Any sentence that does not describe the role, the company, or what is required of the candidate
 
-OUTPUT RULES:
-- Output clean plain text with the section labels above.
-- Do NOT include salary, benefits, allowances, EA numbers, registration numbers, application instructions, cookie notices, portal UI text, or recruiter boilerplate.
-- Do NOT include applicant status labels like "Strong applicant", "Medium application volume", "Posted X ago".
-- If a section is not present in the JD, skip it entirely — do not invent or guess content.
-- When in doubt about whether something is real JD content or portal noise, leave it out."""
+STRICT OUTPUT RULES:
+- Output clean plain text using the section labels above.
+- If a section has no real content, skip it entirely — do not output the label.
+- Do not invent, summarise, or paraphrase beyond what is written in the JD.
+- When in doubt whether something belongs — leave it out.
+- Your output should read like a clean, standalone job description with zero portal noise."""
+
+
+# ── ATS scoring prompt ────────────────────────────────────────────────────────
+ATS_SCORE_PROMPT = """You are a strict ATS (Applicant Tracking System) evaluator specialised in the Singapore job market and SkillsFuture Singapore frameworks.
+
+You will receive a resume and the job description it was evaluated against.
+Score the resume honestly and critically out of 100. Do not inflate scores — a resume that only loosely matches the JD should score in the 40-60 range.
+
+Scoring breakdown (total 100):
+- Keyword Match (30 pts): Exact and semantically similar JD keywords present in the resume, including SkillsFuture Singapore skill terminology. Deduct heavily for missing critical JD keywords.
+- Relevance of Experience (25 pts): How directly the candidate's actual experience maps to the role's day-to-day responsibilities. Generic or loosely related experience scores low.
+- Qualifications Match (20 pts): Education, certifications, and years of experience vs JD requirements. Missing required qualifications is a significant deduction.
+- Resume Clarity & Structure (15 pts): Strong action verbs, quantified achievements, concise bullets, professional summary present and targeted. Vague or passive language scores low.
+- ATS Formatting Compliance (10 pts): Plain text, no tables/columns/special characters, standard section headers, consistent date formatting.
+
+Be honest. If the resume is a weak match for the JD, score it accordingly. A passing score (60+) should only be given when the resume genuinely addresses the core requirements.
+
+Respond ONLY in this exact format — no extra text before or after:
+
+TOTAL_SCORE: <number>
+KEYWORD_MATCH: <number>/30
+RELEVANCE_OF_EXPERIENCE: <number>/25
+QUALIFICATIONS_MATCH: <number>/20
+RESUME_CLARITY: <number>/15
+ATS_FORMATTING: <number>/10
+SUMMARY: <2-3 sentences on key strengths and the single biggest gap holding the score back>
+IMPROVEMENTS: <3 specific, actionable bullet points to improve the ATS score — reference actual missing keywords or JD requirements>"""
 
 
 # ── Session state ──────────────────────────────────────────────────────────────
@@ -264,9 +296,13 @@ if "enhanced_resume" not in st.session_state:
     st.session_state.enhanced_resume = ""
 if "jd_text" not in st.session_state:
     st.session_state.jd_text = ""
+if "ats_result" not in st.session_state:
+    st.session_state.ats_result = None
+if "baseline_ats_result" not in st.session_state:
+    st.session_state.baseline_ats_result = None
 if "tracker_edit" not in st.session_state:
     st.session_state.tracker_edit = pd.DataFrame(
-        [{"Company": "", "Role": "", "Date Applied": str(date.today()), "Status": "Pending"}] * 2
+        columns=["Company", "Role", "Date Applied", "Status"]
     )
 
 # Auto-load base resume once per session
@@ -463,7 +499,25 @@ if enhance_clicked:
     else:
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-        with st.spinner("Enhancing your resume…"):
+        with st.spinner("Step 1/3 — Scoring baseline resume against JD…"):
+            try:
+                baseline_ats_resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": ATS_SCORE_PROMPT},
+                        {"role": "user", "content": (
+                            f"## Resume (Original / Baseline)\n\n{st.session_state.resume_text}"
+                            f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
+                        )},
+                    ],
+                    temperature=0.0,
+                    max_tokens=500,
+                )
+                st.session_state.baseline_ats_result = baseline_ats_resp.choices[0].message.content.strip()
+            except Exception:
+                st.session_state.baseline_ats_result = None
+
+        with st.spinner("Step 2/3 — Enhancing your resume…"):
             try:
                 response = client.chat.completions.create(
                     model=model,
@@ -485,18 +539,24 @@ if enhance_clicked:
                 filepath.write_text(enhanced, encoding="utf-8")
                 st.success(f"✅ Saved to `{filepath}`")
 
-                company = guess_company(st.session_state.jd_text)
-                role    = guess_role(st.session_state.jd_text)
-                if company or role:
-                    new_row = pd.DataFrame([{
-                        "Company": company,
-                        "Role": role,
-                        "Date Applied": str(date.today()),
-                        "Status": "Applied",
-                    }])
-                    st.session_state.tracker_edit = pd.concat(
-                        [st.session_state.tracker_edit, new_row], ignore_index=True
-                    )
+                # ── Step 3: ATS Score enhanced resume ──
+                with st.spinner("Step 3/3 — Scoring enhanced resume…"):
+                    try:
+                        ats_response = client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[
+                                {"role": "system", "content": ATS_SCORE_PROMPT},
+                                {"role": "user", "content": (
+                                    f"## Enhanced Resume\n\n{enhanced}"
+                                    f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
+                                )},
+                            ],
+                            temperature=0.0,
+                            max_tokens=500,
+                        )
+                        st.session_state.ats_result = ats_response.choices[0].message.content.strip()
+                    except Exception:
+                        st.session_state.ats_result = None
 
             except openai.AuthenticationError:
                 st.error("Invalid API key. Please check OPENAI_API_KEY in your .env file.")
@@ -556,6 +616,123 @@ else:
         '<div class="output-box">Your enhanced resume will appear here after clicking Enhance Resume.</div>',
         unsafe_allow_html=True,
     )
+
+# ── ATS Score display ─────────────────────────────────────────────────────────
+def parse_ats(raw: str) -> dict:
+    def pf(label):
+        m = re.search(rf"{label}:\s*([\d.]+)", raw)
+        return float(m.group(1)) if m else None
+    m_sum = re.search(r"SUMMARY:\s*(.+?)(?=IMPROVEMENTS:|$)", raw, re.S)
+    m_imp = re.search(r"IMPROVEMENTS:\s*(.+?)$", raw, re.S)
+    return {
+        "total":       pf("TOTAL_SCORE"),
+        "kw":          pf("KEYWORD_MATCH"),
+        "exp":         pf("RELEVANCE_OF_EXPERIENCE"),
+        "qual":        pf("QUALIFICATIONS_MATCH"),
+        "clarity":     pf("RESUME_CLARITY"),
+        "formatting":  pf("ATS_FORMATTING"),
+        "summary":     m_sum.group(1).strip() if m_sum else "",
+        "improve":     m_imp.group(1).strip() if m_imp else "",
+    }
+
+def score_badge(total, label_text):
+    passed = total >= 60
+    colour = "#2d5a3d" if passed else "#c0392b"
+    bg     = "#e8f2eb" if passed else "#fde8e8"
+    badge  = "✅ PASS" if passed else "❌ BELOW PASSING"
+    return f"""
+    <div style="text-align:center; background:{bg}; border:2px solid {colour};
+                border-radius:12px; padding:12px 20px; min-width:130px;">
+        <div style="font-size:11px; color:{colour}; font-weight:600; margin-bottom:4px;">{label_text}</div>
+        <div style="font-size:2.2rem; font-weight:800; color:{colour}; line-height:1;">{int(total)}</div>
+        <div style="font-size:11px; color:{colour};">/ 100</div>
+        <div style="font-size:11px; font-weight:700; color:{colour}; margin-top:4px;">{badge}</div>
+    </div>"""
+
+def score_bars(scores, baseline_scores=None):
+    breakdown = [
+        ("Keyword Match",           "kw",        30),
+        ("Relevance of Experience", "exp",       25),
+        ("Qualifications Match",    "qual",      20),
+        ("Resume Clarity",          "clarity",   15),
+        ("ATS Formatting",          "formatting",10),
+    ]
+    html = ""
+    for name, key, max_score in breakdown:
+        score = scores.get(key)
+        if score is None:
+            continue
+        pct = int((score / max_score) * 100)
+        bar_colour = "#2d5a3d" if pct >= 60 else "#e67e22" if pct >= 40 else "#c0392b"
+        delta_html = ""
+        if baseline_scores:
+            b = baseline_scores.get(key)
+            if b is not None:
+                diff = score - b
+                arrow = "▲" if diff > 0 else ("▼" if diff < 0 else "–")
+                d_colour = "#2d5a3d" if diff > 0 else ("#c0392b" if diff < 0 else "#888")
+                delta_html = f'<span style="color:{d_colour}; font-size:12px; margin-left:8px;">{arrow} {abs(diff):.0f}</span>'
+        html += f"""
+        <div style="margin-bottom:12px;">
+            <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
+                <span>{name}</span>
+                <span style="font-weight:600;">{int(score)} / {max_score}{delta_html}</span>
+            </div>
+            <div style="background:#e0dbd3; border-radius:6px; height:10px;">
+                <div style="width:{pct}%; background:{bar_colour}; border-radius:6px; height:10px;"></div>
+            </div>
+        </div>"""
+    return html
+
+if st.session_state.ats_result:
+    st.divider()
+    st.subheader("🎯 ATS Score")
+    st.caption("Passing score is 60 / 100 — based on Singapore ATS standards and SkillsFuture keyword alignment.")
+
+    enhanced_scores = parse_ats(st.session_state.ats_result)
+    baseline_scores = parse_ats(st.session_state.baseline_ats_result) if st.session_state.baseline_ats_result else None
+
+    # ── Score badges ──
+    if enhanced_scores["total"] is not None:
+        if baseline_scores and baseline_scores["total"] is not None:
+            b_total = baseline_scores["total"]
+            e_total = enhanced_scores["total"]
+            improvement = e_total - b_total
+            imp_colour = "#2d5a3d" if improvement > 0 else "#c0392b"
+            imp_sign   = "+" if improvement > 0 else ""
+
+            col_b, col_e, col_delta = st.columns([1, 1, 1])
+            with col_b:
+                st.markdown(score_badge(b_total, "BASELINE RESUME"), unsafe_allow_html=True)
+            with col_e:
+                st.markdown(score_badge(e_total, "ENHANCED RESUME"), unsafe_allow_html=True)
+            with col_delta:
+                st.markdown(f"""
+                <div style="text-align:center; border:2px solid {imp_colour}; border-radius:12px;
+                            padding:12px 20px; min-width:130px;">
+                    <div style="font-size:11px; color:{imp_colour}; font-weight:600; margin-bottom:4px;">IMPROVEMENT</div>
+                    <div style="font-size:2.2rem; font-weight:800; color:{imp_colour}; line-height:1;">{imp_sign}{improvement:.0f}</div>
+                    <div style="font-size:11px; color:{imp_colour};">points</div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(score_badge(enhanced_scores["total"], "ENHANCED RESUME"), unsafe_allow_html=True)
+
+        # ── Breakdown bars ──
+        st.write("")
+        st.markdown("**Score Breakdown**" + (" *(▲/▼ vs baseline)*" if baseline_scores else ""))
+        st.markdown(score_bars(enhanced_scores, baseline_scores), unsafe_allow_html=True)
+
+    # ── Summary & improvements ──
+    if enhanced_scores["summary"]:
+        st.markdown("**Summary**")
+        st.info(enhanced_scores["summary"])
+
+    if enhanced_scores["improve"]:
+        st.markdown("**How to improve your score**")
+        for line in enhanced_scores["improve"].split("\n"):
+            line = line.strip().lstrip("-•* ").strip()
+            if line:
+                st.markdown(f"- {line}")
 
 st.markdown(
     '<div class="warn-box">⚠️ <strong>Always review the enhanced resume carefully.</strong> '
