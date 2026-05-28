@@ -426,6 +426,8 @@ if "jd_filename" not in st.session_state:
     st.session_state.jd_filename = ""
 if "jd_editable_value" not in st.session_state:
     st.session_state.jd_editable_value = ""
+if "jd_widget_version" not in st.session_state:
+    st.session_state.jd_widget_version = 0
 if "ats_result" not in st.session_state:
     st.session_state.ats_result = None
 if "baseline_ats_result" not in st.session_state:
@@ -570,8 +572,8 @@ with col_jd:
     )
 
     if jd_file:
-        # Track filename to detect when a new file is uploaded
-        if st.session_state.get("jd_filename") != jd_file.name:
+        # Detect new file by filename — increment widget version to force fresh widget
+        if st.session_state.jd_filename != jd_file.name:
             with st.spinner("Extracting and filtering JD…"):
                 extracted_jd = extract_text(jd_file)
             if extracted_jd:
@@ -591,30 +593,29 @@ with col_jd:
                 except Exception:
                     ai_cleaned_jd = pre_cleaned
 
-                # Store new JD and reset the editable widget by clearing its key
                 st.session_state.jd_text = ai_cleaned_jd
-                st.session_state.jd_filename = jd_file.name
                 st.session_state.jd_editable_value = ai_cleaned_jd
+                st.session_state.jd_filename = jd_file.name
+                # Increment version — this changes the widget key, forcing Streamlit
+                # to treat it as a completely new widget with the new value
+                st.session_state.jd_widget_version += 1
                 st.success(f"✅ JD processed from **{jd_file.name}** — showing relevant content only")
             else:
                 st.error("Could not extract text. Try a different file format.")
 
     # ── Editable JD preview — always shown once JD is loaded ──
-    if st.session_state.get("jd_editable_value") or st.session_state.jd_text:
-        # Use jd_editable_value as the source of truth for the widget
-        if "jd_editable_value" not in st.session_state:
-            st.session_state.jd_editable_value = st.session_state.jd_text
-
+    if st.session_state.jd_editable_value:
         st.caption("✏️ Edit below to correct company name, job role, or any missing info before enhancing.")
+        # Key includes widget version — changes on new upload, forcing widget reset
+        widget_key = f"jd_editable_{st.session_state.jd_widget_version}"
         edited_jd = st.text_area(
             "Extracted JD (editable)",
             label_visibility="collapsed",
             value=st.session_state.jd_editable_value,
             height=250,
-            key="jd_editable",
+            key=widget_key,
             help="Edit this directly — corrections here will be used for enhancement and will auto-fill the tracker.",
         )
-        # Sync both session state vars with whatever the user typed
         st.session_state.jd_text = edited_jd
         st.session_state.jd_editable_value = edited_jd
 
@@ -721,8 +722,9 @@ if enhance_clicked:
                 # ── Auto-log to tracker ──
                 st.session_state.enhance_count += 1
 
-                # Read from the editable JD widget value — captures user edits correctly
-                _jd_source = st.session_state.get("jd_editable", st.session_state.jd_text)
+                # Read from the editable JD widget — use versioned key to get latest edits
+                _widget_key = f"jd_editable_{st.session_state.jd_widget_version}"
+                _jd_source = st.session_state.get(_widget_key, st.session_state.jd_text)
 
                 def _extract_field(text, patterns):
                     for _line in text.split("\n"):
