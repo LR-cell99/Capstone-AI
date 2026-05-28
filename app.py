@@ -590,10 +590,22 @@ with col_jd:
 
             st.session_state.jd_text = ai_cleaned_jd
             st.success(f"✅ JD processed from **{jd_file.name}** — showing relevant content only")
-            with st.expander("Preview extracted JD"):
-                st.text(ai_cleaned_jd[:1500] + ("…" if len(ai_cleaned_jd) > 1500 else ""))
         else:
             st.error("Could not extract text. Try a different file format.")
+
+    # ── Editable JD preview — always shown once JD is loaded ──
+    if st.session_state.jd_text:
+        st.caption("✏️ Edit below to correct company name, job role, or any missing info before enhancing.")
+        edited_jd = st.text_area(
+            "Extracted JD (editable)",
+            label_visibility="collapsed",
+            value=st.session_state.jd_text,
+            height=250,
+            key="jd_editable",
+            help="Edit this directly — corrections here will be used for enhancement and will auto-fill the tracker.",
+        )
+        # Keep session state in sync with edits
+        st.session_state.jd_text = edited_jd
 
     with st.expander("Or paste JD manually"):
         manual_jd = st.text_area(
@@ -714,13 +726,13 @@ if enhance_clicked:
                         if _val and _val.lower() not in ("na", "not applicable", ""):
                             _role = _val
 
-                auto_row_id = insert_to_supabase(_company, _role, str(date.today()), "Not Applied")
+                # Stage row in session only — user confirms via the form before Supabase save
                 auto_row = pd.DataFrame([{
                     "Company":      _company,
                     "Role":         _role,
                     "Date Applied": str(date.today()),
                     "Status":       "Not Applied",
-                    "id":           auto_row_id or "",
+                    "id":           "",  # No id yet — assigned on Supabase confirm
                 }])
                 st.session_state.tracker_edit = pd.concat(
                     [st.session_state.tracker_edit, auto_row], ignore_index=True
@@ -963,41 +975,79 @@ st.caption("Track every application. Edit directly in the table below.")
 STATUS_OPTIONS = ["Not Applied", "Pending", "Applied", "Interview", "Offer", "Rejected"]
 
 # ── Quick-add row form ──
-with st.expander("➕ Add new application entry", expanded=False):
+# Pre-fill from latest tracker row (most recent auto-logged entry)
+def get_latest_tracker_defaults() -> dict:
+    """Pull the most recent row from the in-session tracker as form defaults."""
+    df = st.session_state.tracker_edit
+    if df.empty:
+        # Fall back to JD text if tracker has no rows yet
+        _company, _role = "NA", "NA"
+        if st.session_state.jd_text:
+            for _line in st.session_state.jd_text.split("\n"):
+                _line = _line.strip()
+                if re.match(r"(?i)^(company name|company)\s*[:\-]", _line) and _company == "NA":
+                    _v = re.sub(r"(?i)^(company name|company)\s*[:\-]\s*", "", _line).strip()
+                    if _v and _v.lower() not in ("na", "not applicable", ""):
+                        _company = _v
+                if re.match(r"(?i)^(job title|role|position)\s*[:\-]", _line) and _role == "NA":
+                    _v = re.sub(r"(?i)^(job title|role|position)\s*[:\-]\s*", "", _line).strip()
+                    if _v and _v.lower() not in ("na", "not applicable", ""):
+                        _role = _v
+        return {"company": _company, "role": _role, "status": "Not Applied"}
+
+    last = df.iloc[-1]
+    return {
+        "company": str(last.get("Company", "NA") or "NA"),
+        "role":    str(last.get("Role", "NA") or "NA"),
+        "status":  str(last.get("Status", "Not Applied") or "Not Applied"),
+    }
+
+with st.expander("➕ Review & save application entry to database", expanded=False):
+    st.caption("Pre-filled from the latest tracker entry. Review and correct before saving to Supabase.")
+
+    defaults = get_latest_tracker_defaults()
+
     c1, c2 = st.columns(2)
     with c1:
-        # Try to pre-fill from JD if available
-        default_company = ""
-        default_role = ""
-        if st.session_state.jd_text:
-            # Extract company and role from the cleaned JD text
-            jd_lines = st.session_state.jd_text.split("\n")
-            for line in jd_lines:
-                line = line.strip()
-                if re.match(r"(?i)^(company name|company)\s*[:\-]", line) and not default_company:
-                    default_company = re.sub(r"(?i)^(company name|company)\s*[:\-]\s*", "", line).strip()
-                if re.match(r"(?i)^(job title|role|position)\s*[:\-]", line) and not default_role:
-                    default_role = re.sub(r"(?i)^(job title|role|position)\s*[:\-]\s*", "", line).strip()
-
-        new_company = st.text_input("Company", value=default_company, key="new_company")
-        new_role    = st.text_input("Role", value=default_role, key="new_role")
+        new_company = st.text_input(
+            "Company",
+            value=defaults["company"],
+            key="new_company",
+            help="Edit if the auto-extracted company name is wrong or NA.",
+        )
+        new_role = st.text_input(
+            "Role",
+            value=defaults["role"],
+            key="new_role",
+            help="Edit if the auto-extracted role is wrong or NA.",
+        )
     with c2:
         new_date   = st.date_input("Date Applied", value=date.today(), key="new_date")
-        new_status = st.selectbox("Status", STATUS_OPTIONS, index=0, key="new_status")
-
-    if st.button("Add Entry", use_container_width=False):
-        row_id = insert_to_supabase(new_company, new_role, str(new_date), new_status)
-        new_row = pd.DataFrame([{
-            "Company":      new_company,
-            "Role":         new_role,
-            "Date Applied": str(new_date),
-            "Status":       new_status,
-            "id":           row_id or "",
-        }])
-        st.session_state.tracker_edit = pd.concat(
-            [st.session_state.tracker_edit, new_row], ignore_index=True
+        new_status = st.selectbox(
+            "Status",
+            STATUS_OPTIONS,
+            index=STATUS_OPTIONS.index(defaults["status"]) if defaults["status"] in STATUS_OPTIONS else 0,
+            key="new_status",
         )
-        st.rerun()
+
+    st.info(f"📋 **Review before saving:** Company: **{new_company}** | Role: **{new_role}** | Date: **{new_date}** | Status: **{new_status}**")
+
+    col_save, col_cancel = st.columns([1, 5])
+    with col_save:
+        if st.button("✅ Confirm & Save to Supabase", use_container_width=True):
+            row_id = insert_to_supabase(new_company, new_role, str(new_date), new_status)
+            # Update the latest matching row in session state with confirmed data
+            df = st.session_state.tracker_edit
+            if not df.empty:
+                last_idx = df.index[-1]
+                st.session_state.tracker_edit.at[last_idx, "Company"]      = new_company
+                st.session_state.tracker_edit.at[last_idx, "Role"]         = new_role
+                st.session_state.tracker_edit.at[last_idx, "Date Applied"] = str(new_date)
+                st.session_state.tracker_edit.at[last_idx, "Status"]       = new_status
+                if "id" in st.session_state.tracker_edit.columns and row_id:
+                    st.session_state.tracker_edit.at[last_idx, "id"]       = row_id
+            st.success("✅ Saved to Supabase.")
+            st.rerun()
 
 # ── Tracker table ──
 # Build display df with entry number, hide internal id
