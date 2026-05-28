@@ -619,16 +619,19 @@ with col_jd:
         st.session_state.jd_text = edited_jd
         st.session_state.jd_editable_value = edited_jd
 
-    with st.expander("Or paste JD manually"):
-        manual_jd = st.text_area(
-            "JD text",
-            label_visibility="collapsed",
-            placeholder="Paste the job description here…",
-            height=200,
-            key="manual_jd",
-        )
-        if manual_jd.strip():
-            st.session_state.jd_text = manual_jd
+    # Only show manual paste if no file has been uploaded yet
+    if not st.session_state.jd_editable_value:
+        with st.expander("Or paste JD manually"):
+            manual_jd = st.text_area(
+                "JD text",
+                label_visibility="collapsed",
+                placeholder="Paste the job description here…",
+                height=200,
+                key="manual_jd",
+            )
+            if manual_jd.strip():
+                st.session_state.jd_text = manual_jd
+                st.session_state.jd_editable_value = manual_jd
 
 
 # ── Enhance button ─────────────────────────────────────────────────────────────
@@ -726,23 +729,43 @@ if enhance_clicked:
                 _widget_key = f"jd_editable_{st.session_state.jd_widget_version}"
                 _jd_source = st.session_state.get(_widget_key, st.session_state.jd_text)
 
-                def _extract_field(text, patterns):
-                    for _line in text.split("\n"):
+                def _extract_field(text, label_patterns):
+                    """
+                    Handles two formats:
+                    1. Inline:  "Company name: Micron"
+                    2. Newline: "Company name\nMicron"
+                    """
+                    lines = text.split("\n")
+                    for i, _line in enumerate(lines):
                         _line = _line.strip()
-                        for pat, sub_pat in patterns:
-                            if re.match(pat, _line):
-                                _val = re.sub(sub_pat, "", _line).strip()
-                                if _val and _val.lower() not in ("na", "not applicable", ""):
+                        for label_pat in label_patterns:
+                            # Format 1: label and value on same line with colon/dash
+                            if re.match(label_pat + r"\s*[:\-]\s*.+", _line, re.I):
+                                _val = re.sub(label_pat + r"\s*[:\-]\s*", "", _line, flags=re.I).strip()
+                                if _val and _val.lower() not in ("na", "not applicable", "none", ""):
                                     return _val
+                            # Format 2: label on one line, value on the next line
+                            if re.match(label_pat + r"\s*[:\-]?\s*$", _line, re.I):
+                                # Value is on the next non-empty line
+                                for j in range(i + 1, min(i + 3, len(lines))):
+                                    _next = lines[j].strip()
+                                    if _next and not re.match(
+                                        r"(?i)^(job title|role|position|key responsibilities|required|preferred|company name|company|about)",
+                                        _next
+                                    ):
+                                        if _next.lower() not in ("na", "not applicable", "none", ""):
+                                            return _next
+                                        break
                     return "NA"
 
                 _company = _extract_field(_jd_source, [
-                    (r"(?i)^(company name|company)\s*[:\-]",
-                     r"(?i)^(company name|company)\s*[:\-]\s*"),
+                    r"(?i)company name",
+                    r"(?i)company",
                 ])
                 _role = _extract_field(_jd_source, [
-                    (r"(?i)^(job title|role|position)\s*[:\-]",
-                     r"(?i)^(job title|role|position)\s*[:\-]\s*"),
+                    r"(?i)job title",
+                    r"(?i)role",
+                    r"(?i)position",
                 ])
 
                 # Stage row in session only — user confirms via the form before Supabase save
@@ -995,6 +1018,34 @@ STATUS_OPTIONS = ["Not Applied", "Pending", "Applied", "Interview", "Offer", "Re
 
 # ── Quick-add row form ──
 # Pre-fill from latest tracker row (most recent auto-logged entry)
+def _parse_jd_field(text: str, label_patterns: list) -> str:
+    """
+    Extract a field value from JD text.
+    Handles: "Label: Value" (same line) and "Label\nValue" (next line).
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        line = line.strip()
+        for pat in label_patterns:
+            # Same line with colon
+            if re.match(pat + r"\s*[:\-]\s*.+", line, re.I):
+                val = re.sub(pat + r"\s*[:\-]\s*", "", line, flags=re.I).strip()
+                if val and val.lower() not in ("na", "not applicable", "none", ""):
+                    return val
+            # Label only on this line, value on next non-empty line
+            if re.match(pat + r"\s*[:\-]?\s*$", line, re.I):
+                for j in range(i + 1, min(i + 3, len(lines))):
+                    nxt = lines[j].strip()
+                    if nxt and not re.match(
+                        r"(?i)^(job title|role|position|key responsibilities|required|preferred|company name|company|about)",
+                        nxt
+                    ):
+                        if nxt.lower() not in ("na", "not applicable", "none", ""):
+                            return nxt
+                        break
+    return "NA"
+
+
 def get_latest_tracker_defaults() -> dict:
     """Pull the most recent row from the in-session tracker as form defaults."""
     df = st.session_state.tracker_edit
@@ -1002,16 +1053,10 @@ def get_latest_tracker_defaults() -> dict:
         # Fall back to JD text if tracker has no rows yet
         _company, _role = "NA", "NA"
         if st.session_state.jd_text:
-            for _line in st.session_state.jd_text.split("\n"):
-                _line = _line.strip()
-                if re.match(r"(?i)^(company name|company)\s*[:\-]", _line) and _company == "NA":
-                    _v = re.sub(r"(?i)^(company name|company)\s*[:\-]\s*", "", _line).strip()
-                    if _v and _v.lower() not in ("na", "not applicable", ""):
-                        _company = _v
-                if re.match(r"(?i)^(job title|role|position)\s*[:\-]", _line) and _role == "NA":
-                    _v = re.sub(r"(?i)^(job title|role|position)\s*[:\-]\s*", "", _line).strip()
-                    if _v and _v.lower() not in ("na", "not applicable", ""):
-                        _role = _v
+            _company = _parse_jd_field(st.session_state.jd_text,
+                [r"(?i)company name", r"(?i)company"])
+            _role    = _parse_jd_field(st.session_state.jd_text,
+                [r"(?i)job title", r"(?i)role", r"(?i)position"])
         return {"company": _company, "role": _role, "status": "Not Applied"}
 
     last = df.iloc[-1]
