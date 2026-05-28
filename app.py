@@ -261,37 +261,53 @@ def clean_jd_text(raw: str) -> str:
 
 
 # ── System prompt ──────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a professional resume writer and ATS optimisation specialist for the Singapore job market.
+SYSTEM_PROMPT = """You are a senior professional resume writer for the Singapore job market. You are editing a candidate's resume to better align it with a specific job description — not rewriting it from scratch.
 
-You will receive a candidate's ORIGINAL resume and a CLEANED job description.
-Your task is to produce a meaningfully rewritten resume — not a light touch-up.
+YOUR GOAL: The enhanced resume must feel like the same person wrote it, but with sharper language, better JD alignment, and stronger professional framing. Preserve the candidate's voice, their actual experience, and the essence of what they have written. Only change what needs changing.
 
-STEP 1 — ANALYSE
-- Read every bullet point, sentence, and skill in the original resume carefully.
-- Identify every keyword, skill term, and requirement in the job description.
-- Note the gaps: what JD keywords are missing from the resume? What existing resume content can be reframed to address them?
+STEP 1 — ANALYSE BEFORE EDITING
+a) Read the full resume carefully. Note what is already strong — these sections need minimal or no change.
+b) Extract every keyword, skill term, and requirement from the JD.
+c) Identify specifically: which bullets are vague or passive? Which JD keywords are missing? Which skills are named differently from the JD?
+d) These gaps are your edit targets — focus your effort here.
 
-STEP 2 — REWRITE (this must be a substantial rewrite, not cosmetic)
-- REWRITE the professional summary completely — it must directly mirror the JD's language and priorities.
-- REWRITE every bullet point under work experience:
-  * Replace vague or passive language with strong action verbs (led, engineered, implemented, reduced, optimised, delivered, collaborated, troubleshot, calibrated, validated, etc.)
-  * Reframe existing responsibilities using the exact terminology and keywords from the JD wherever truthful
-  * Add quantification where the original supports it (e.g. "maintained equipment" → "maintained and troubleshot 12 production-line machines, reducing downtime by identifying recurring fault patterns")
-  * Structure bullets in result-first or STAR format
-- REWRITE the skills section: reorder and reword skills to match JD terminology exactly. If the candidate lists "machine maintenance" and the JD says "preventive maintenance", use "preventive maintenance".
-- Keep all section headers, education, and contact info intact.
+STEP 2 — TARGETED EDITING (change what needs changing, preserve what is already good)
 
-HALLUCINATION RULES — strictly enforced:
-- NEVER add a skill, tool, technology, certification, or experience the candidate does not already have.
-- NEVER invent metrics or numbers not supported by the original resume.
-- You may REFRAME and REWORD existing experience using JD language — this is not hallucination.
-- You may REORDER content to put the most JD-relevant experience first.
+SUMMARY SECTION:
+- Use the original summary as your reference and foundation — do not discard the candidate's intent or voice.
+- Rewrite it to be more targeted: weave in the JD's job title, 2-3 key JD skill terms, and the industry context if not already present.
+- Keep the same general structure and length. The candidate should recognise their own summary.
+- Example: "Motivated engineer looking to grow in manufacturing" → "Motivated Manufacturing Engineer with experience in equipment maintenance and process support, seeking to contribute to semiconductor production environments through hands-on troubleshooting and preventive maintenance."
+
+WORK EXPERIENCE BULLETS:
+- For bullets that are already strong and JD-relevant — keep them, minor wording polish only.
+- For bullets that are vague, passive, or missing JD alignment — rewrite those specifically:
+  * Use the formula: [Strong verb] + [what you did] + [how / with what] + [result or impact]
+  * Use the EXACT terminology from the JD where applicable (e.g. "root cause analysis" not "finding problems")
+  * Where no result is stated and one can be reasonably inferred from context, add it.
+- Strong verbs: Executed, Implemented, Collaborated, Optimised, Reduced, Troubleshot, Calibrated, Validated, Coordinated, Monitored, Analysed, Resolved, Streamlined, Supported, Facilitated.
+- Do NOT rewrite every bullet just for the sake of it — only rewrite bullets that genuinely need it.
+
+SKILLS SECTION:
+- Reorder so the most JD-critical skills appear first.
+- Where a skill is named differently from the JD equivalent, use the JD's exact terminology.
+- Only add a skill if the candidate's work experience clearly demonstrates it — not just because the JD lists it.
+
+EDUCATION / CERTIFICATIONS:
+- Keep factually intact. No changes unless formatting needs tidying.
+
+HALLUCINATION RULES — non-negotiable:
+- NEVER invent a job, company, title, degree, or certification not in the original.
+- NEVER add a skill with no basis in the candidate's actual experience.
+- NEVER fabricate metrics or achievements not supported by the original resume.
+- Reframing, rewording, and reordering existing content is encouraged and is NOT hallucination.
 
 OUTPUT RULES — strictly enforced:
-- Output ONLY the resume content. No introductory sentence, no closing remark, no commentary, no notes.
-- Do NOT output lines like "This resume has been tailored...", "Note:", "I have updated...", or any explanation.
-- Do NOT use markdown formatting or code fences.
-- The very first character must be the candidate's name. The very last character must be the end of the resume."""
+- Output ONLY the resume content. No preamble, commentary, closing note, or explanation of any kind.
+- Do NOT write "Here is the enhanced resume", "Note:", "I have updated...", or anything similar.
+- Do NOT use markdown formatting or code fences unless they were in the original.
+- The very first character must be the candidate's name or contact info.
+- The very last character must be the last word of the resume."""
 
 
 # ── JD extraction prompt ──────────────────────────────────────────────────────
@@ -342,41 +358,52 @@ ATS_SCORE_PROMPT = """You are a brutally honest ATS (Applicant Tracking System) 
 
 You will receive a resume and a job description. Score the resume out of 100.
 
-SCORING RULES — read carefully before scoring:
+STEP 0 — VALIDATE THE JD FIRST:
+Before scoring, check whether the job description contains real hiring content:
+- Real hiring content = actual job title, responsibilities, required skills/qualifications written by a hiring manager.
+- NOT real hiring content = Wikipedia articles, news articles, generic web pages, "Not applicable" across all fields, cookie notices, portal noise with no actual role described.
+
+If the JD does NOT contain real hiring content:
+- Set TOTAL_SCORE to 0
+- Set all category scores to 0
+- Set SUMMARY to: "Invalid job description — no real hiring content detected. ATS scoring requires an actual job posting with a role title, responsibilities, and requirements."
+- Set IMPROVEMENTS to: "Upload a real job description from a job portal or employer website."
+- Output in the required format and stop.
+
+SCORING RULES (only apply if JD is valid):
 - There is NO minimum score. A poor match can score 20, 30, or 40. Do not anchor to 60.
-- 60+ is a PASS and means the resume genuinely addresses the core role requirements.
-- Below 60 is a FAIL and is expected when the resume is a weak or moderate match.
-- Score what is actually in the resume — not what could be there or what you assume.
-- Do NOT give benefit of the doubt. If a keyword is absent, deduct for it. If experience is vague, deduct for it.
+- 60+ is a PASS meaning the resume genuinely addresses the core role requirements.
+- Below 60 is a FAIL — expected for weak or moderate matches.
+- Score only what is actually in the resume. Do NOT give benefit of the doubt.
+- If a keyword is absent, deduct. If experience is vague, deduct.
 
 SCORING BREAKDOWN (total 100):
 - Keyword Match (30 pts):
-  * Count how many critical JD keywords and SkillsFuture Singapore skill terms appear in the resume.
-  * Missing more than half the critical keywords = 0-10 pts.
-  * Most keywords present but loosely = 11-20 pts.
-  * Strong keyword alignment = 21-30 pts.
+  * Missing more than half the critical JD keywords = 0-10 pts.
+  * Most keywords loosely present = 11-20 pts.
+  * Strong keyword alignment including SkillsFuture Singapore terms = 21-30 pts.
 
 - Relevance of Experience (25 pts):
-  * Score 0-8 if experience is in a different field or only loosely related.
-  * Score 9-16 if some experience is relevant but gaps are significant.
-  * Score 17-25 if experience directly maps to the role responsibilities.
+  * Experience in a different field or only loosely related = 0-8 pts.
+  * Some relevant experience but significant gaps = 9-16 pts.
+  * Experience directly maps to the role responsibilities = 17-25 pts.
 
 - Qualifications Match (20 pts):
-  * Missing required degree/certification = deduct 10+ pts immediately.
+  * Missing required degree or certification = deduct 10+ pts immediately.
   * Wrong field of study for a technical role = deduct 8 pts.
   * Meets all requirements = 17-20 pts.
 
 - Resume Clarity & Structure (15 pts):
-  * Vague bullets with no action verbs or results = 0-5 pts.
+  * Vague bullets, no action verbs, no results = 0-5 pts.
   * Some strong language but inconsistent = 6-10 pts.
-  * Consistently strong action verbs, quantified results, targeted summary = 11-15 pts.
+  * Strong action verbs, quantified results, targeted summary throughout = 11-15 pts.
 
 - ATS Formatting Compliance (10 pts):
   * Standard plain text, clean headers, consistent dates = 8-10 pts.
   * Minor issues = 5-7 pts.
-  * Tables, columns, special characters = 0-4 pts.
+  * Tables, columns, or special characters = 0-4 pts.
 
-TOTAL_SCORE must equal the sum of all five category scores exactly.
+TOTAL_SCORE must equal the exact sum of all five category scores.
 
 Respond ONLY in this exact format — no extra text before or after:
 
@@ -386,8 +413,8 @@ RELEVANCE_OF_EXPERIENCE: <number>/25
 QUALIFICATIONS_MATCH: <number>/20
 RESUME_CLARITY: <number>/15
 ATS_FORMATTING: <number>/10
-SUMMARY: <2-3 sentences stating the score honestly — name the biggest weaknesses specifically, not generically>
-IMPROVEMENTS: <3 specific actionable bullet points referencing exact missing keywords or requirements from the JD>"""
+SUMMARY: <2-3 sentences — be specific about weaknesses, name actual missing keywords or mismatches>
+IMPROVEMENTS: <3 specific actionable bullet points referencing exact missing keywords or JD requirements>"""
 
 
 # ── Session state ──────────────────────────────────────────────────────────────
@@ -623,19 +650,41 @@ if enhance_clicked:
 
         with st.spinner("Step 2/3 — Enhancing your resume…"):
             try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": (
-                            f"## Candidate Resume\n\n{st.session_state.resume_text}"
-                            f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
-                        )},
-                    ],
-                    temperature=0.4,
-                    max_tokens=2500,
+                def similarity_ratio(a: str, b: str) -> float:
+                    """Rough word-overlap similarity between two texts."""
+                    words_a = set(a.lower().split())
+                    words_b = set(b.lower().split())
+                    if not words_a or not words_b:
+                        return 1.0
+                    return len(words_a & words_b) / max(len(words_a), len(words_b))
+
+                user_content = (
+                    f"## Candidate Resume\n\n{st.session_state.resume_text}"
+                    f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
                 )
-                enhanced = response.choices[0].message.content.strip()
+
+                # Try up to 2 times — retry if output is too similar to baseline
+                enhanced = None
+                for attempt in range(2):
+                    temp = 0.7 if attempt == 0 else 0.9
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": user_content},
+                        ],
+                        temperature=temp,
+                        max_tokens=3500,
+                    )
+                    candidate = response.choices[0].message.content.strip()
+                    sim = similarity_ratio(st.session_state.resume_text, candidate)
+                    # Accept if similarity is below 80% or it's the last attempt
+                    if sim < 0.80 or attempt == 1:
+                        enhanced = candidate
+                        if sim >= 0.80:
+                            st.warning(f"⚠️ Enhancement is very similar to your baseline (similarity: {sim:.0%}). This may mean the JD has too little content or your resume is already well-matched.")
+                        break
+
                 st.session_state.enhanced_resume = enhanced
 
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -843,32 +892,33 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Debug panel ────────────────────────────────────────────────────────────────
-with st.expander("🔍 Debug — verify ATS inputs & raw scores", expanded=False):
-    st.markdown("**What was sent to baseline ATS scorer:**")
-    if st.session_state.get("resume_text"):
-        st.text(st.session_state.resume_text[:800] + ("…" if len(st.session_state.resume_text) > 800 else ""))
-    else:
-        st.caption("No baseline resume in session.")
+# ── Debug panel (only shown after enhancement has run) ────────────────────────
+if st.session_state.enhanced_resume:
+ with st.expander("🔍 Debug — verify ATS inputs & raw scores", expanded=False):
+     st.markdown("**What was sent to baseline ATS scorer:**")
+     if st.session_state.get("resume_text"):
+         st.text(st.session_state.resume_text[:800] + ("…" if len(st.session_state.resume_text) > 800 else ""))
+     else:
+         st.caption("No baseline resume in session.")
 
-    st.markdown("**What was sent to enhanced ATS scorer:**")
-    if st.session_state.get("enhanced_resume"):
-        st.text(st.session_state.enhanced_resume[:800] + ("…" if len(st.session_state.enhanced_resume) > 800 else ""))
-    else:
-        st.caption("No enhanced resume in session.")
+     st.markdown("**What was sent to enhanced ATS scorer:**")
+     if st.session_state.get("enhanced_resume"):
+         st.text(st.session_state.enhanced_resume[:800] + ("…" if len(st.session_state.enhanced_resume) > 800 else ""))
+     else:
+         st.caption("No enhanced resume in session.")
 
-    st.markdown("**Raw baseline ATS response:**")
-    st.code(st.session_state.baseline_ats_result or "None", language="text")
+     st.markdown("**Raw baseline ATS response:**")
+     st.code(st.session_state.baseline_ats_result or "None", language="text")
 
-    st.markdown("**Raw enhanced ATS response:**")
-    st.code(st.session_state.ats_result or "None", language="text")
+     st.markdown("**Raw enhanced ATS response:**")
+     st.code(st.session_state.ats_result or "None", language="text")
 
-    st.markdown("**Are baseline and enhanced resume identical?**")
-    same = st.session_state.get("resume_text","") == st.session_state.get("enhanced_resume","")
-    if same:
-        st.error("⚠️ YES — the enhanced resume is identical to the baseline. The enhancer may not have run correctly.")
-    else:
-        st.success("✅ No — the enhanced resume differs from the baseline.")
+     st.markdown("**Are baseline and enhanced resume identical?**")
+     same = st.session_state.get("resume_text","") == st.session_state.get("enhanced_resume","")
+     if same:
+         st.error("⚠️ YES — the enhanced resume is identical to the baseline. The enhancer may not have run correctly.")
+     else:
+         st.success("✅ No — the enhanced resume differs from the baseline.")
 
 
 # ── Application Tracker ────────────────────────────────────────────────────────
