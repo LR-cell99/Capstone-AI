@@ -3,7 +3,7 @@ import openai
 import os
 import re
 import io
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
@@ -426,6 +426,8 @@ if "ats_result" not in st.session_state:
     st.session_state.ats_result = None
 if "baseline_ats_result" not in st.session_state:
     st.session_state.baseline_ats_result = None
+if "enhance_count" not in st.session_state:
+    st.session_state.enhance_count = 0
 if "tracker_edit" not in st.session_state:
     st.session_state.tracker_edit = load_tracker_from_supabase()
 if "supabase_ok" not in st.session_state:
@@ -688,9 +690,41 @@ if enhance_clicked:
                 st.session_state.enhanced_resume = enhanced
 
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
-                filepath = Path(output_dir) / f"enhanced_{date.today().isoformat()}.txt"
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+                filepath = Path(output_dir) / f"enhanced_{timestamp}.txt"
                 filepath.write_text(enhanced, encoding="utf-8")
                 st.success(f"✅ Saved to `{filepath}`")
+
+                # ── Auto-log to tracker ──
+                st.session_state.enhance_count += 1
+                entry_num = st.session_state.enhance_count
+
+                # Try to extract company and role from cleaned JD
+                _company = "NA"
+                _role = "NA"
+                _jd_lines = st.session_state.jd_text.split("\n")
+                for _line in _jd_lines:
+                    _line = _line.strip()
+                    if re.match(r"(?i)^(company name|company)\s*[:\-]", _line) and _company == "NA":
+                        _val = re.sub(r"(?i)^(company name|company)\s*[:\-]\s*", "", _line).strip()
+                        if _val and _val.lower() not in ("na", "not applicable", ""):
+                            _company = _val
+                    if re.match(r"(?i)^(job title|role|position)\s*[:\-]", _line) and _role == "NA":
+                        _val = re.sub(r"(?i)^(job title|role|position)\s*[:\-]\s*", "", _line).strip()
+                        if _val and _val.lower() not in ("na", "not applicable", ""):
+                            _role = _val
+
+                auto_row_id = insert_to_supabase(_company, _role, str(date.today()), "Not Applied")
+                auto_row = pd.DataFrame([{
+                    "Company":      _company,
+                    "Role":         _role,
+                    "Date Applied": str(date.today()),
+                    "Status":       "Not Applied",
+                    "id":           auto_row_id or "",
+                }])
+                st.session_state.tracker_edit = pd.concat(
+                    [st.session_state.tracker_edit, auto_row], ignore_index=True
+                )
 
                 # ── Step 3: ATS Score enhanced resume ──
                 with st.spinner("Step 3/3 — Scoring enhanced resume…"):
@@ -926,7 +960,7 @@ st.divider()
 st.subheader("📋 Application Tracker")
 st.caption("Track every application. Edit directly in the table below.")
 
-STATUS_OPTIONS = ["Pending", "Applied", "Interview", "Offer", "Rejected"]
+STATUS_OPTIONS = ["Not Applied", "Pending", "Applied", "Interview", "Offer", "Rejected"]
 
 # ── Quick-add row form ──
 with st.expander("➕ Add new application entry", expanded=False):
@@ -949,7 +983,7 @@ with st.expander("➕ Add new application entry", expanded=False):
         new_role    = st.text_input("Role", value=default_role, key="new_role")
     with c2:
         new_date   = st.date_input("Date Applied", value=date.today(), key="new_date")
-        new_status = st.selectbox("Status", STATUS_OPTIONS, key="new_status")
+        new_status = st.selectbox("Status", STATUS_OPTIONS, index=0, key="new_status")
 
     if st.button("Add Entry", use_container_width=False):
         row_id = insert_to_supabase(new_company, new_role, str(new_date), new_status)
@@ -966,16 +1000,17 @@ with st.expander("➕ Add new application entry", expanded=False):
         st.rerun()
 
 # ── Tracker table ──
-# Hide the internal id column from display
-display_df = st.session_state.tracker_edit.drop(
-    columns=["id"], errors="ignore"
-)
+# Build display df with entry number, hide internal id
+display_df = st.session_state.tracker_edit.drop(columns=["id"], errors="ignore").copy()
+display_df.insert(0, "#", range(1, len(display_df) + 1))
 
 edited = st.data_editor(
     display_df,
     num_rows="dynamic",
     use_container_width=True,
+    disabled=["#"],
     column_config={
+        "#":            st.column_config.NumberColumn("#", width="small"),
         "Company":      st.column_config.TextColumn("Company"),
         "Role":         st.column_config.TextColumn("Role"),
         "Date Applied": st.column_config.DateColumn("Date Applied", format="YYYY-MM-DD"),
@@ -984,10 +1019,13 @@ edited = st.data_editor(
     key="tracker_editor",
 )
 
-# Sync edits back to Supabase row by row
-if not edited.equals(display_df):
-    id_col = st.session_state.tracker_edit.get("id", pd.Series(dtype=str)) if "id" in st.session_state.tracker_edit.columns else pd.Series(dtype=str)
-    for i, row in edited.iterrows():
+# Sync edits back to Supabase row by row (drop # column before comparing/saving)
+edited_no_num = edited.drop(columns=["#"], errors="ignore")
+display_no_num = display_df.drop(columns=["#"], errors="ignore")
+
+if not edited_no_num.equals(display_no_num):
+    id_col = st.session_state.tracker_edit["id"] if "id" in st.session_state.tracker_edit.columns else pd.Series(dtype=str)
+    for i, row in edited_no_num.iterrows():
         row_id = id_col.iloc[i] if i < len(id_col) else ""
         update_supabase_row(
             str(row_id),
@@ -996,10 +1034,9 @@ if not edited.equals(display_df):
             str(row.get("Date Applied", "")),
             str(row.get("Status", "")),
         )
-    # Rebuild local state with ids preserved
-    edited_with_id = edited.copy()
+    edited_with_id = edited_no_num.copy()
     if "id" in st.session_state.tracker_edit.columns:
-        edited_with_id["id"] = st.session_state.tracker_edit["id"].reindex(edited.index).values
+        edited_with_id["id"] = st.session_state.tracker_edit["id"].reindex(edited_no_num.index).values
     st.session_state.tracker_edit = edited_with_id
 
 col_r, col_exp, _ = st.columns([1, 1, 4])
@@ -1010,7 +1047,7 @@ with col_r:
 with col_exp:
     st.download_button(
         label="⬇ Export CSV",
-        data=edited.to_csv(index=False).encode("utf-8"),
+        data=edited.drop(columns=["#"], errors="ignore").to_csv(index=False).encode("utf-8"),
         file_name=f"applications_{date.today().isoformat()}.csv",
         mime="text/csv",
         use_container_width=True,
