@@ -709,22 +709,28 @@ if enhance_clicked:
 
                 # ── Auto-log to tracker ──
                 st.session_state.enhance_count += 1
-                entry_num = st.session_state.enhance_count
 
-                # Try to extract company and role from cleaned JD
-                _company = "NA"
-                _role = "NA"
-                _jd_lines = st.session_state.jd_text.split("\n")
-                for _line in _jd_lines:
-                    _line = _line.strip()
-                    if re.match(r"(?i)^(company name|company)\s*[:\-]", _line) and _company == "NA":
-                        _val = re.sub(r"(?i)^(company name|company)\s*[:\-]\s*", "", _line).strip()
-                        if _val and _val.lower() not in ("na", "not applicable", ""):
-                            _company = _val
-                    if re.match(r"(?i)^(job title|role|position)\s*[:\-]", _line) and _role == "NA":
-                        _val = re.sub(r"(?i)^(job title|role|position)\s*[:\-]\s*", "", _line).strip()
-                        if _val and _val.lower() not in ("na", "not applicable", ""):
-                            _role = _val
+                # Read from the editable JD widget value — captures user edits correctly
+                _jd_source = st.session_state.get("jd_editable", st.session_state.jd_text)
+
+                def _extract_field(text, patterns):
+                    for _line in text.split("\n"):
+                        _line = _line.strip()
+                        for pat, sub_pat in patterns:
+                            if re.match(pat, _line):
+                                _val = re.sub(sub_pat, "", _line).strip()
+                                if _val and _val.lower() not in ("na", "not applicable", ""):
+                                    return _val
+                    return "NA"
+
+                _company = _extract_field(_jd_source, [
+                    (r"(?i)^(company name|company)\s*[:\-]",
+                     r"(?i)^(company name|company)\s*[:\-]\s*"),
+                ])
+                _role = _extract_field(_jd_source, [
+                    (r"(?i)^(job title|role|position)\s*[:\-]",
+                     r"(?i)^(job title|role|position)\s*[:\-]\s*"),
+                ])
 
                 # Stage row in session only — user confirms via the form before Supabase save
                 auto_row = pd.DataFrame([{
@@ -1094,11 +1100,7 @@ if not edited_no_num.equals(display_no_num):
         edited_with_id["id"] = st.session_state.tracker_edit["id"].reindex(edited_no_num.index).values
     st.session_state.tracker_edit = edited_with_id
 
-col_r, col_exp, _ = st.columns([1, 1, 4])
-with col_r:
-    if st.button("🔄 Refresh", use_container_width=True, help="Reload tracker from Supabase"):
-        st.session_state.tracker_edit = load_tracker_from_supabase()
-        st.rerun()
+col_exp, _ = st.columns([1, 5])
 with col_exp:
     st.download_button(
         label="⬇ Export CSV",
