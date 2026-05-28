@@ -422,6 +422,10 @@ if "enhanced_resume" not in st.session_state:
     st.session_state.enhanced_resume = ""
 if "jd_text" not in st.session_state:
     st.session_state.jd_text = ""
+if "jd_filename" not in st.session_state:
+    st.session_state.jd_filename = ""
+if "jd_editable_value" not in st.session_state:
+    st.session_state.jd_editable_value = ""
 if "ats_result" not in st.session_state:
     st.session_state.ats_result = None
 if "baseline_ats_result" not in st.session_state:
@@ -566,46 +570,53 @@ with col_jd:
     )
 
     if jd_file:
-        with st.spinner("Extracting and filtering JD…"):
-            extracted_jd = extract_text(jd_file)
-        if extracted_jd:
-            # Step 1: regex pre-clean to remove obvious portal boilerplate
-            pre_cleaned = clean_jd_text(extracted_jd)
+        # Track filename to detect when a new file is uploaded
+        if st.session_state.get("jd_filename") != jd_file.name:
+            with st.spinner("Extracting and filtering JD…"):
+                extracted_jd = extract_text(jd_file)
+            if extracted_jd:
+                pre_cleaned = clean_jd_text(extracted_jd)
+                try:
+                    _client = openai.OpenAI(api_key=OPENAI_API_KEY)
+                    _jd_resp = _client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": JD_EXTRACT_PROMPT},
+                            {"role": "user", "content": pre_cleaned},
+                        ],
+                        temperature=0.0,
+                        max_tokens=1000,
+                    )
+                    ai_cleaned_jd = _jd_resp.choices[0].message.content.strip()
+                except Exception:
+                    ai_cleaned_jd = pre_cleaned
 
-            # Step 2: AI extraction to keep only role-relevant content
-            try:
-                _client = openai.OpenAI(api_key=OPENAI_API_KEY)
-                _jd_resp = _client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": JD_EXTRACT_PROMPT},
-                        {"role": "user", "content": pre_cleaned},
-                    ],
-                    temperature=0.0,
-                    max_tokens=1000,
-                )
-                ai_cleaned_jd = _jd_resp.choices[0].message.content.strip()
-            except Exception:
-                ai_cleaned_jd = pre_cleaned
-
-            st.session_state.jd_text = ai_cleaned_jd
-            st.success(f"✅ JD processed from **{jd_file.name}** — showing relevant content only")
-        else:
-            st.error("Could not extract text. Try a different file format.")
+                # Store new JD and reset the editable widget by clearing its key
+                st.session_state.jd_text = ai_cleaned_jd
+                st.session_state.jd_filename = jd_file.name
+                st.session_state.jd_editable_value = ai_cleaned_jd
+                st.success(f"✅ JD processed from **{jd_file.name}** — showing relevant content only")
+            else:
+                st.error("Could not extract text. Try a different file format.")
 
     # ── Editable JD preview — always shown once JD is loaded ──
-    if st.session_state.jd_text:
+    if st.session_state.get("jd_editable_value") or st.session_state.jd_text:
+        # Use jd_editable_value as the source of truth for the widget
+        if "jd_editable_value" not in st.session_state:
+            st.session_state.jd_editable_value = st.session_state.jd_text
+
         st.caption("✏️ Edit below to correct company name, job role, or any missing info before enhancing.")
         edited_jd = st.text_area(
             "Extracted JD (editable)",
             label_visibility="collapsed",
-            value=st.session_state.jd_text,
+            value=st.session_state.jd_editable_value,
             height=250,
             key="jd_editable",
             help="Edit this directly — corrections here will be used for enhancement and will auto-fill the tracker.",
         )
-        # Keep session state in sync with edits
+        # Sync both session state vars with whatever the user typed
         st.session_state.jd_text = edited_jd
+        st.session_state.jd_editable_value = edited_jd
 
     with st.expander("Or paste JD manually"):
         manual_jd = st.text_area(
