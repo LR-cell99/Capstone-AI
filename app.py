@@ -1002,6 +1002,11 @@ with st.expander("➕ Add new application entry", expanded=False):
 # ── Tracker table ──
 # Build display df with entry number, hide internal id
 display_df = st.session_state.tracker_edit.drop(columns=["id"], errors="ignore").copy()
+# Convert Date Applied to datetime so DateColumn renders correctly
+if "Date Applied" in display_df.columns:
+    display_df["Date Applied"] = pd.to_datetime(
+        display_df["Date Applied"], errors="coerce"
+    ).dt.date
 display_df.insert(0, "#", range(1, len(display_df) + 1))
 
 edited = st.data_editor(
