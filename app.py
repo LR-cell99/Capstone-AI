@@ -12,7 +12,80 @@ import pdfplumber
 from docx import Document
 
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY")
+SUPABASE_URL    = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+
+# ── Supabase client ────────────────────────────────────────────────────────────
+from supabase import create_client, Client as SupabaseClient
+
+def get_supabase() -> SupabaseClient | None:
+    if SUPABASE_URL and SUPABASE_ANON_KEY:
+        try:
+            return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        except Exception:
+            return None
+    return None
+
+def load_tracker_from_supabase() -> pd.DataFrame:
+    sb = get_supabase()
+    if not sb:
+        return pd.DataFrame(columns=["Company", "Role", "Date Applied", "Status", "id"])
+    try:
+        res = sb.table("applications").select("*").order("created_at", desc=False).execute()
+        rows = res.data or []
+        if not rows:
+            return pd.DataFrame(columns=["Company", "Role", "Date Applied", "Status", "id"])
+        df = pd.DataFrame(rows)
+        df = df.rename(columns={
+            "company":      "Company",
+            "role":         "Role",
+            "date_applied": "Date Applied",
+            "status":       "Status",
+        })
+        cols = ["Company", "Role", "Date Applied", "Status", "id"]
+        return df[[c for c in cols if c in df.columns]]
+    except Exception:
+        return pd.DataFrame(columns=["Company", "Role", "Date Applied", "Status", "id"])
+
+def insert_to_supabase(company: str, role: str, date_applied: str, status: str) -> str | None:
+    """Insert a new row, return the new row id or None on failure."""
+    sb = get_supabase()
+    if not sb:
+        return None
+    try:
+        res = sb.table("applications").insert({
+            "company":      company,
+            "role":         role,
+            "date_applied": date_applied,
+            "status":       status,
+        }).execute()
+        return res.data[0]["id"] if res.data else None
+    except Exception:
+        return None
+
+def update_supabase_row(row_id: str, company: str, role: str, date_applied: str, status: str):
+    sb = get_supabase()
+    if not sb or not row_id:
+        return
+    try:
+        sb.table("applications").update({
+            "company":      company,
+            "role":         role,
+            "date_applied": str(date_applied),
+            "status":       status,
+        }).eq("id", row_id).execute()
+    except Exception:
+        pass
+
+def delete_supabase_row(row_id: str):
+    sb = get_supabase()
+    if not sb or not row_id:
+        return
+    try:
+        sb.table("applications").delete().eq("id", row_id).execute()
+    except Exception:
+        pass
 
 
 # ── Text extraction ────────────────────────────────────────────────────────────
@@ -301,9 +374,9 @@ if "ats_result" not in st.session_state:
 if "baseline_ats_result" not in st.session_state:
     st.session_state.baseline_ats_result = None
 if "tracker_edit" not in st.session_state:
-    st.session_state.tracker_edit = pd.DataFrame(
-        columns=["Company", "Role", "Date Applied", "Status"]
-    )
+    st.session_state.tracker_edit = load_tracker_from_supabase()
+if "supabase_ok" not in st.session_state:
+    st.session_state.supabase_ok = bool(get_supabase())
 
 # Auto-load base resume once per session
 if "resume_text" not in st.session_state or not st.session_state.resume_text:
@@ -355,9 +428,14 @@ st.divider()
 with st.sidebar:
     st.header("⚙️ Settings")
     if OPENAI_API_KEY:
-        st.success("✅ API key loaded from .env")
+        st.success("✅ OpenAI API key loaded")
     else:
         st.error("❌ OPENAI_API_KEY not found in .env")
+
+    if SUPABASE_URL and SUPABASE_ANON_KEY:
+        st.success("✅ Supabase connected")
+    else:
+        st.warning("⚠️ Supabase not configured — add SUPABASE_URL and SUPABASE_ANON_KEY to .env")
 
     model = st.selectbox(
         "Model",
@@ -717,22 +795,21 @@ if st.session_state.ats_result:
         else:
             st.markdown(score_badge(enhanced_scores["total"], "ENHANCED RESUME"), unsafe_allow_html=True)
 
-        # ── Breakdown bars ──
+        # ── Breakdown in expander ──
         st.write("")
-        st.markdown("**Score Breakdown**" + (" *(▲/▼ vs baseline)*" if baseline_scores else ""))
-        st.markdown(score_bars(enhanced_scores, baseline_scores), unsafe_allow_html=True)
+        with st.expander("📊 View score breakdown" + (" *(▲/▼ vs baseline)*" if baseline_scores else ""), expanded=False):
+            st.markdown(score_bars(enhanced_scores, baseline_scores), unsafe_allow_html=True)
 
-    # ── Summary & improvements ──
-    if enhanced_scores["summary"]:
-        st.markdown("**Summary**")
-        st.info(enhanced_scores["summary"])
+            if enhanced_scores["summary"]:
+                st.markdown("**Summary**")
+                st.info(enhanced_scores["summary"])
 
-    if enhanced_scores["improve"]:
-        st.markdown("**How to improve your score**")
-        for line in enhanced_scores["improve"].split("\n"):
-            line = line.strip().lstrip("-•* ").strip()
-            if line:
-                st.markdown(f"- {line}")
+            if enhanced_scores["improve"]:
+                st.markdown("**How to improve your score**")
+                for line in enhanced_scores["improve"].split("\n"):
+                    line = line.strip().lstrip("-•* ").strip()
+                    if line:
+                        st.markdown(f"- {line}")
 
 st.markdown(
     '<div class="warn-box">⚠️ <strong>Always review the enhanced resume carefully.</strong> '
@@ -748,20 +825,85 @@ st.caption("Track every application. Edit directly in the table below.")
 
 STATUS_OPTIONS = ["Pending", "Applied", "Interview", "Offer", "Rejected"]
 
+# ── Quick-add row form ──
+with st.expander("➕ Add new application entry", expanded=False):
+    c1, c2 = st.columns(2)
+    with c1:
+        # Try to pre-fill from JD if available
+        default_company = ""
+        default_role = ""
+        if st.session_state.jd_text:
+            # Extract company and role from the cleaned JD text
+            jd_lines = st.session_state.jd_text.split("\n")
+            for line in jd_lines:
+                line = line.strip()
+                if re.match(r"(?i)^(company name|company)\s*[:\-]", line) and not default_company:
+                    default_company = re.sub(r"(?i)^(company name|company)\s*[:\-]\s*", "", line).strip()
+                if re.match(r"(?i)^(job title|role|position)\s*[:\-]", line) and not default_role:
+                    default_role = re.sub(r"(?i)^(job title|role|position)\s*[:\-]\s*", "", line).strip()
+
+        new_company = st.text_input("Company", value=default_company, key="new_company")
+        new_role    = st.text_input("Role", value=default_role, key="new_role")
+    with c2:
+        new_date   = st.date_input("Date Applied", value=date.today(), key="new_date")
+        new_status = st.selectbox("Status", STATUS_OPTIONS, key="new_status")
+
+    if st.button("Add Entry", use_container_width=False):
+        row_id = insert_to_supabase(new_company, new_role, str(new_date), new_status)
+        new_row = pd.DataFrame([{
+            "Company":      new_company,
+            "Role":         new_role,
+            "Date Applied": str(new_date),
+            "Status":       new_status,
+            "id":           row_id or "",
+        }])
+        st.session_state.tracker_edit = pd.concat(
+            [st.session_state.tracker_edit, new_row], ignore_index=True
+        )
+        st.rerun()
+
+# ── Tracker table ──
+# Hide the internal id column from display
+display_df = st.session_state.tracker_edit.drop(
+    columns=["id"], errors="ignore"
+)
+
 edited = st.data_editor(
-    st.session_state.tracker_edit,
+    display_df,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS, required=True),
-        "Date Applied": st.column_config.TextColumn("Date Applied"),
+        "Company":      st.column_config.TextColumn("Company"),
+        "Role":         st.column_config.TextColumn("Role"),
+        "Date Applied": st.column_config.DateColumn("Date Applied", format="YYYY-MM-DD"),
+        "Status":       st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS, required=True),
     },
     key="tracker_editor",
 )
 
-st.session_state.tracker_edit = edited
+# Sync edits back to Supabase row by row
+if not edited.equals(display_df):
+    id_col = st.session_state.tracker_edit.get("id", pd.Series(dtype=str)) if "id" in st.session_state.tracker_edit.columns else pd.Series(dtype=str)
+    for i, row in edited.iterrows():
+        row_id = id_col.iloc[i] if i < len(id_col) else ""
+        update_supabase_row(
+            str(row_id),
+            str(row.get("Company", "")),
+            str(row.get("Role", "")),
+            str(row.get("Date Applied", "")),
+            str(row.get("Status", "")),
+        )
+    # Rebuild local state with ids preserved
+    edited_with_id = edited.copy()
+    if "id" in st.session_state.tracker_edit.columns:
+        edited_with_id["id"] = st.session_state.tracker_edit["id"].reindex(edited.index).values
+    st.session_state.tracker_edit = edited_with_id
 
-col_exp, _ = st.columns([1, 5])
+col_r, col_exp, _ = st.columns([1, 1, 4])
+with col_r:
+    if st.button("🔄 Refresh", use_container_width=True, help="Reload tracker from Supabase"):
+        st.session_state.tracker_edit = load_tracker_from_supabase()
+        st.rerun()
 with col_exp:
     st.download_button(
         label="⬇ Export CSV",
@@ -770,3 +912,8 @@ with col_exp:
         mime="text/csv",
         use_container_width=True,
     )
+
+if st.session_state.supabase_ok:
+    st.caption("✅ Connected to Supabase — entries saved automatically.")
+else:
+    st.caption("⚠️ Supabase not connected — entries stored in session only.")
