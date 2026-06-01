@@ -803,7 +803,7 @@ if st.session_state.enhanced_resume:
         if st.button("↺ Clear History", use_container_width=True):
             st.session_state.revision_history = []
             st.session_state.edited_resume = st.session_state.enhanced_resume
-            st.rerun()
+            st.session_state.revision_version += 1
 
     if apply_revision and revision_input.strip():
         with st.spinner("Applying revision…"):
@@ -861,7 +861,7 @@ if st.session_state.enhanced_resume:
                     pass  # Keep old skills gap if update fails
 
                 st.success("✅ Revision applied — skills gap updated. Run ATS Score to re-evaluate.")
-                st.rerun()
+                # revision_version increment already done above — Streamlit re-renders naturally
             except Exception as e:
                 st.error(f"Revision failed: {e}")
 
