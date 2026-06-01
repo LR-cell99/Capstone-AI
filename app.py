@@ -271,39 +271,50 @@ _ATS_RULES = """
 STEP 0 — VALIDATE JD: If JD lacks real hiring content (Wikipedia, generic pages, all "Not applicable"), set all scores to 0, SUMMARY to "Invalid job description", IMPROVEMENTS to "Upload a real job posting", and stop.
 
 SCORING (valid JD only):
-- There is NO minimum and NO maximum anchor. Scores range freely from 0 to 100.
-- A resume that is an excellent match for the JD SHOULD score 80-95+. Do not hold back high scores when genuinely earned.
-- 60+ = PASS. Below 60 = FAIL. But a great resume can score 75, 85, or 95 — score what you actually see.
-- Score only what is in the resume. Do NOT give benefit of the doubt for weak content. Do NOT hold back for strong content.
+- Scores range freely from 0 to 100. No floor, no ceiling, no anchor point.
+- 60+ = PASS. Below 60 = FAIL.
+- Score exactly what you see — reward strong alignment, penalise weak alignment, do not cluster around any number.
+- A poor match can score 10-30. An average match 40-59. A good match 60-74. A strong match 75-89. An excellent match 90-100.
 
 KEYWORD MATCH (30 pts):
-- 0-10: Missing more than half the critical JD keywords
-- 11-18: Most keywords loosely present, some critical ones missing
-- 19-24: Strong keyword presence, minor gaps only
-- 25-30: Excellent — nearly all JD keywords and SkillsFuture terms present, naturally integrated
+- 0-3:   No JD keywords present, completely unrelated vocabulary
+- 4-7:   Only 1-2 incidental keyword matches, core JD terms all missing
+- 8-10:  A few relevant keywords but most critical JD terms absent
+- 11-15: Some keywords present but inconsistently, many critical ones missing
+- 16-18: Most keywords loosely present, a few critical ones still missing
+- 19-24: Strong keyword presence across the resume, minor gaps only
+- 25-30: Excellent — nearly all JD keywords and SkillsFuture terms present and naturally integrated
 
 RELEVANCE OF EXPERIENCE (25 pts):
-- 0-8: Different field or only loosely related
-- 9-15: Some relevant experience, significant gaps
-- 16-20: Experience clearly maps to role responsibilities
-- 21-25: Excellent — experience directly and comprehensively addresses the JD responsibilities
+- 0-3:   Completely unrelated field, no transferable experience
+- 4-6:   Largely unrelated, only peripheral relevance to the role
+- 7-9:   Different field but some transferable skills visible
+- 10-13: Partially relevant, significant gaps in core responsibilities
+- 14-16: Some experience maps to the role but coverage is incomplete
+- 17-20: Experience clearly maps to most role responsibilities
+- 21-25: Excellent — experience directly and comprehensively addresses all JD responsibilities
 
 QUALIFICATIONS MATCH (20 pts):
-- 0-8: Missing required degree or certification, wrong field
-- 9-13: Partially meets requirements
-- 14-17: Meets core requirements
-- 18-20: Excellent — fully meets or exceeds all stated qualifications and preferred requirements
+- 0-3:   Missing required degree and certification, completely wrong field
+- 4-6:   Missing required degree, wrong field of study
+- 7-9:   Has a degree but wrong discipline for a technical role, or missing key certifications
+- 10-13: Partially meets requirements, some gaps in stated qualifications
+- 14-17: Meets core requirements with minor gaps
+- 18-20: Excellent — fully meets or exceeds all stated and preferred qualifications
 
 RESUME CLARITY & STRUCTURE (15 pts):
-- 0-5: Vague, passive language, no action verbs, no results
-- 6-9: Some strong language but inconsistent
-- 10-12: Consistently strong language, good structure
-- 13-15: Excellent — strong action verbs throughout, quantified results, tightly targeted summary
+- 0-2:   No structure, walls of text, no action verbs, no results whatsoever
+- 3-5:   Very vague and passive language throughout, minimal structure
+- 6-8:   Some structure but mostly weak language, few action verbs
+- 9-11:  Inconsistent — some strong bullets alongside weak ones
+- 12-13: Consistently clear language, good structure, most bullets action-oriented
+- 14-15: Excellent — strong action verbs throughout, quantified results, tightly targeted summary
 
 ATS FORMATTING COMPLIANCE (10 pts):
-- 0-4: Tables, columns, or special characters present
-- 5-7: Minor formatting issues
-- 8-10: Clean plain text, standard headers, consistent dates
+- 0-2:   Heavy use of tables, columns, graphics, or special characters — will fail most parsers
+- 3-5:   Some formatting elements that may trip parsers
+- 6-7:   Minor formatting issues, mostly clean
+- 8-10:  Clean plain text, standard section headers, consistent date formatting
 
 TOTAL_SCORE = exact sum of all five categories.
 
@@ -314,8 +325,8 @@ RELEVANCE_OF_EXPERIENCE: <n>/25
 QUALIFICATIONS_MATCH: <n>/20
 RESUME_CLARITY: <n>/15
 ATS_FORMATTING: <n>/10
-SUMMARY: <2-3 sentences — be specific, name actual strengths AND weaknesses, name missing keywords if any>
-IMPROVEMENTS: <3 specific actionable bullet points referencing exact JD requirements>"""
+SUMMARY: <2-3 sentences — name actual strengths AND specific weaknesses, reference exact missing keywords if any>
+IMPROVEMENTS: <3 specific actionable bullet points referencing exact missing keywords or JD requirements>"""
 
 BASELINE_ATS_PROMPT = (
     "You are a precise ATS evaluator for Singapore. Score the ORIGINAL BASELINE resume honestly. "
