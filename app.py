@@ -112,21 +112,79 @@ def generate_pdf(text: str) -> bytes:
     pdf.add_page()
     pdf.set_margins(20, 20, 20)
     pdf.set_auto_page_break(True, 20)
+    pw = pdf.w - pdf.l_margin - pdf.r_margin
+    line_h = 6
+    indent = 5
+
+    def estimated_lines(txt, width, font_size=10):
+        """Estimate how many lines a string will wrap to."""
+        pdf.set_font("Helvetica", "", font_size)
+        char_w = pdf.get_string_width("m")  # avg char width
+        chars_per_line = max(1, int(width / char_w))
+        words = txt.split()
+        lines, current = 1, 0
+        for word in words:
+            wlen = len(word) + 1
+            if current + wlen > chars_per_line:
+                lines += 1
+                current = wlen
+            else:
+                current += wlen
+        return lines
+
+    def page_space_left():
+        """Remaining vertical space before bottom margin."""
+        return pdf.h - pdf.b_margin - pdf.get_y()
+
     for line in text.split("\n"):
         s = sanitise(line.strip())
         if not s:
             pdf.ln(3); continue
+
         if s.isupper() and len(s) > 2:
-            pdf.set_font("Helvetica", "B", 13); pdf.ln(3); pdf.cell(0, 8, s, ln=True)
+            # Section header — keep on same page if possible
+            needed = 8 + 2 + 4  # header + rule + spacing
+            if page_space_left() < needed:
+                pdf.add_page()
+            pdf.set_font("Helvetica", "B", 13); pdf.ln(3)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(pw, 8, s)
             pdf.set_draw_color(45, 90, 61); pdf.set_line_width(0.5)
-            pdf.line(20, pdf.get_y(), 190, pdf.get_y()); pdf.ln(2)
+            pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + pw, pdf.get_y()); pdf.ln(2)
+
         elif s.startswith(("-", "*")):
-            pdf.set_font("Helvetica", "", 10); pdf.set_x(25)
-            pdf.cell(5, 6, "-", ln=False); pdf.multi_cell(0, 6, s.lstrip("-* ").strip())
-        elif len(s) < 60 and not s.endswith("."):
-            pdf.set_font("Helvetica", "B", 10); pdf.cell(0, 6, s, ln=True)
+            # Bullet — estimate full height and keep together on same page
+            bullet_text = s.lstrip("-* ").strip()
+            bullet_width = pw - indent - 4
+            n_lines = estimated_lines(bullet_text, bullet_width)
+            needed = n_lines * line_h + 2
+            if page_space_left() < needed:
+                pdf.add_page()
+            pdf.set_font("Helvetica", "", 10)
+            pdf.set_x(pdf.l_margin + indent)
+            pdf.cell(4, line_h, "-", ln=False)
+            pdf.multi_cell(bullet_width, line_h, bullet_text)
+
+        elif len(s) < 80 and not s.endswith("."):
+            # Short bold line — company, title, date
+            n_lines = estimated_lines(s, pw, font_size=10)
+            needed = n_lines * line_h + 1
+            if page_space_left() < needed:
+                pdf.add_page()
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(pw, line_h, s)
+
         else:
-            pdf.set_font("Helvetica", "", 10); pdf.multi_cell(0, 6, s)
+            # Body text
+            n_lines = estimated_lines(s, pw)
+            needed = n_lines * line_h + 1
+            if page_space_left() < needed:
+                pdf.add_page()
+            pdf.set_font("Helvetica", "", 10)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(pw, line_h, s)
+
     return bytes(pdf.output())
 
 # ── Excel export ───────────────────────────────────────────────────────────────
@@ -200,6 +258,12 @@ def parse_jd_field(text: str, labels: list) -> str:
 # ── Prompts ────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a senior professional resume writer for the Singapore job market. Edit the candidate's resume to better align it with the job description — not a full rewrite.
 
+CRITICAL OUTPUT RULES — read these first, follow them absolutely:
+- Output ONLY the resume content. Start with the candidate's name. End with the last line of resume content.
+- Do NOT write any sentence after the resume ends. No summary, no note, no explanation.
+- Do NOT write lines like "The resume has been updated...", "Key skills have been reframed...", "This resume now better aligns...", "Note:", "I have..." or anything similar.
+- If you find yourself about to write an explanatory sentence — stop. Delete it. Output only the resume.
+
 GOAL: The enhanced resume must feel like the same person wrote it, with sharper language, better JD alignment, and stronger framing. Preserve the candidate's authentic voice and actual experience. Only change what needs changing — but everything that can be aligned to the JD, should be.
 
 STEP 1 — ANALYSE BEFORE EDITING:
@@ -250,7 +314,9 @@ HALLUCINATION RULES — non-negotiable:
 - Reframing, rewording, reordering, and re-emphasising existing content is encouraged and is NOT hallucination.
 - You may make implied results explicit if the original context supports them.
 
-OUTPUT RULES: Output ONLY the resume. No preamble, commentary, or explanation. No markdown. First character = candidate name. Do not add any closing line or marker after the last line of resume content."""
+OUTPUT RULES — final reminder:
+- The very last character of your output must be the last character of resume content.
+- Nothing after it. No summary. No note. No explanation. Just the resume."""
 
 JD_EXTRACT_PROMPT = """You are a strict job description parser for Singapore job portals. Extract ONLY what a hiring manager actually wrote.
 
@@ -380,10 +446,15 @@ REVISION_PROMPT = """You are a professional resume editor. You will receive:
 2. The original job description it was tailored for
 3. A specific revision request from the candidate
 
+CRITICAL OUTPUT RULES — follow these absolutely:
+- Output ONLY the revised resume. Start with the candidate's name. End with the last line of resume content.
+- Do NOT write any sentence after the resume ends. No summary, no note, no explanation of what you changed.
+- Do NOT write lines like "The resume has been updated...", "Key skills have been reframed...", "I have added...", "Note:" or anything similar.
+- The very last character must be the last character of resume content. Nothing after it.
+
 Apply the requested revision carefully. Maintain the same structure and formatting.
 
-HALLUCINATION RULES: NEVER add skills, jobs, degrees, or certifications not in the resume.
-OUTPUT RULES: Output ONLY the revised resume. No preamble, no commentary, no explanation. Do not add any closing line, note, or marker after the last line of resume content."""
+HALLUCINATION RULES: NEVER add skills, jobs, degrees, or certifications not in the resume."""
 
 # ── Session state ──────────────────────────────────────────────────────────────
 _SS_DEFAULTS = {
@@ -723,17 +794,18 @@ if st.session_state.enhanced_resume:
     st.caption("Edit directly below before exporting.")
     edited = st.text_area("Edit resume", label_visibility="collapsed",
                           value=st.session_state.edited_resume, height=500,
-                          key="editable_output",
+                          key=f"editable_output_{st.session_state.revision_version}",
                           help="Edit here — changes apply to exports.")
     st.session_state.edited_resume = edited
 
+    _dl_ts = datetime.now().strftime("%Y-%m-%d_%H%M")
     col1, col2, col3, _ = st.columns([1, 1, 1, 3])
     with col1:
         st.download_button("⬇ Download .txt", data=edited,
-                           file_name=f"enhanced_resume_{date.today()}.txt", mime="text/plain", use_container_width=True)
+                           file_name=f"enhanced_resume_{_dl_ts}.txt", mime="text/plain", use_container_width=True)
     with col2:
         st.download_button("⬇ Download .pdf", data=generate_pdf(edited),
-                           file_name=f"enhanced_resume_{date.today()}.pdf", mime="application/pdf", use_container_width=True)
+                           file_name=f"enhanced_resume_{_dl_ts}.pdf", mime="application/pdf", use_container_width=True)
     with col3:
         if st.button("↺ Reset edits", use_container_width=True):
             active = versions[st.session_state.active_version_idx]["content"] if versions else st.session_state.enhanced_resume
@@ -813,10 +885,7 @@ def bars(scores, base=None):
 st.markdown('<div class="warn-box">⚠️ <strong>Always review the enhanced resume carefully.</strong> AI may occasionally embellish skills or experience — validate before applying.</div>', unsafe_allow_html=True)
 
 # ── ATS Score button + display ─────────────────────────────────────────────────
-@st.fragment
-def ats_section():
-    if not st.session_state.enhanced_resume:
-        return
+if st.session_state.enhanced_resume:
     st.divider()
     col_ats_btn, col_ats_info = st.columns([1, 5])
     with col_ats_btn:
@@ -829,11 +898,13 @@ def ats_section():
             st.caption("Click to score your enhanced resume — including after revisions.")
 
     if run_ats:
+        # Always read from session state directly — not from widget which may be stale
         current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
-        cache_key = hashlib.md5((current_resume + st.session_state.jd_text).encode()).hexdigest()
+        cache_key = hashlib.md5(
+            (current_resume + st.session_state.jd_text + str(st.session_state.revision_version)).encode()
+        ).hexdigest()
         if cache_key in st.session_state.ats_score_cache:
             st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
-            st.info("ℹ️ Score retrieved from cache — same resume content always returns the same score.")
         else:
             with st.spinner("Scoring enhanced resume…"):
                 try:
@@ -850,7 +921,6 @@ def ats_section():
                 except Exception as e:
                     st.error(f"ATS scoring failed: {e}")
 
-    # Show ATS results if available
     if st.session_state.ats_result:
         es = parse_ats(st.session_state.ats_result)
         bs = parse_ats(st.session_state.baseline_ats_result) if st.session_state.baseline_ats_result else None
@@ -875,7 +945,7 @@ def ats_section():
                         l = l.strip().lstrip("-•* ").strip()
                         if l: st.markdown(f"- {l}")
 
-ats_section()
+
 
 if st.session_state.enhanced_resume:
     with st.expander("🔍 Debug — verify ATS inputs & raw scores"):
@@ -965,6 +1035,7 @@ if st.session_state.enhanced_resume:
                 st.session_state._last_enhanced = revised
                 st.session_state.revision_version += 1
                 st.session_state.ats_result = None
+                st.session_state.ats_score_cache = {}  # Clear so revision gets fresh score
 
                 st.session_state.revision_history.append({
                     "request": revision_input,
