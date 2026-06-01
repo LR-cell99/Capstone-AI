@@ -291,7 +291,7 @@ _SS_DEFAULTS = {
     "jd_text": "", "jd_filename": "", "jd_editable_value": "",
     "jd_widget_version": 0, "ats_result": None, "baseline_ats_result": None,
     "enhance_count": 0, "is_enhancing": False,
-    "skills_gap": None, "revision_history": [],
+    "skills_gap": None, "revision_history": [], "revision_version": 0, "revision_version": 0,
 }
 for k, v in _SS_DEFAULTS.items():
     if k not in st.session_state:
@@ -332,11 +332,8 @@ with st.sidebar:
         st.error("❌ OPENAI_API_KEY not found in .env")
     if SUPABASE_URL and SUPABASE_ANON_KEY:
         st.success("✅ Supabase connected")
-        st.caption(f"URL: `{SUPABASE_URL[:30]}…`")
-        st.caption(f"Key: `{SUPABASE_ANON_KEY[:15]}…`")
     else:
-        st.warning("⚠️ Supabase not configured")
-        st.caption(f"URL: {'✅' if SUPABASE_URL else '❌'}  Key: {'✅' if SUPABASE_ANON_KEY else '❌'}")
+        st.warning("⚠️ Supabase not configured — add SUPABASE_URL and SUPABASE_ANON_KEY to .env")
     model = st.selectbox("Model", ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
                          help="gpt-4o gives the best results.")
     st.divider()
@@ -504,16 +501,8 @@ if enhance_clicked:
                     "Date Applied": str(date.today()), "Status": "Not Applied", "id": ""
                 }])], ignore_index=True)
 
-                with st.spinner("Step 3/3 — Scoring enhanced resume…"):
-                    try:
-                        ar = client.chat.completions.create(model="gpt-4o-mini", temperature=ENHANCED_ATS_TEMP, max_tokens=600,
-                            messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
-                                      {"role":"user","content":f"## Enhanced Resume\n\n{enhanced}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"}])
-                        st.session_state.ats_result = ar.choices[0].message.content.strip()
-                    except Exception:
-                        st.session_state.ats_result = None
-
-                # ── Step 4: Skills gap analysis ──
+                # ── Step 3: Skills gap analysis ──
+                # (ATS scoring of enhanced resume is now a manual button — see below)
                 try:
                     gap_content = f"## Resume\n\n{enhanced}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
                     gr = client.chat.completions.create(model="gpt-4o-mini", temperature=0.0, max_tokens=800,
@@ -542,7 +531,8 @@ if st.session_state.enhanced_resume:
         st.session_state._last_enhanced = st.session_state.enhanced_resume
 
     edited = st.text_area("Edit resume", label_visibility="collapsed",
-                          value=st.session_state.edited_resume, height=500, key="editable_output",
+                          value=st.session_state.edited_resume, height=500,
+                          key=f"editable_output_{st.session_state.revision_version}",
                           help="Edit here — changes apply to exports.")
     st.session_state.edited_resume = edited
 
@@ -631,6 +621,11 @@ if st.session_state.enhanced_resume:
                     f"## Current Resume\n\n{current}"
                     f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
                     f"\n\n---\n\n## Revision Request\n\n{revision_input}"
+                    f"\n\n---\n\n## IMPORTANT INSTRUCTION\n\n"
+                    f"If you cannot integrate the requested change naturally into the resume, "
+                    f"append a clearly marked section at the very end of the resume under the heading:\n"
+                    f"--- SUGGESTED ADDITIONS (please review and integrate manually) ---\n"
+                    f"List the changes or additions there so the candidate can place them manually."
                 )
                 rev_resp = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
                     model=model, temperature=0.5, max_tokens=3500,
@@ -640,17 +635,54 @@ if st.session_state.enhanced_resume:
                     ]
                 )
                 revised = rev_resp.choices[0].message.content.strip()
+
+                # Update both enhanced_resume and edited_resume and bump version
+                # so the text area widget re-renders with the new content
+                st.session_state.enhanced_resume = revised
                 st.session_state.edited_resume = revised
+                st.session_state._last_enhanced = revised
+                st.session_state.revision_version += 1
+                st.session_state.ats_result = None  # Clear old score — needs re-run
+
                 st.session_state.revision_history.append({
                     "request": revision_input,
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 })
-                st.success("✅ Revision applied — review the output above.")
+                st.success("✅ Revision applied — review the output above. Run ATS Score to re-evaluate.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Revision failed: {e}")
 
 # ── ATS Score display ──────────────────────────────────────────────────────────
+# Button-triggered scoring of enhanced/revised resume
+if st.session_state.enhanced_resume:
+    st.divider()
+    col_ats_btn, col_ats_info = st.columns([1, 5])
+    with col_ats_btn:
+        run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
+                            help="Score the current enhanced resume against the JD.")
+    with col_ats_info:
+        if st.session_state.ats_result:
+            st.caption("ATS score shown below. Click again after revisions to re-evaluate.")
+        else:
+            st.caption("Click to score your enhanced resume against the JD at any time — including after revisions.")
+
+    if run_ats:
+        with st.spinner("Scoring enhanced resume…"):
+            try:
+                ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                    model="gpt-4o-mini", temperature=ENHANCED_ATS_TEMP, max_tokens=600,
+                    messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
+                              {"role":"user","content":(
+                                  f"## Enhanced Resume\n\n{st.session_state.edited_resume or st.session_state.enhanced_resume}"
+                                  f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
+                              )}])
+                st.session_state.ats_result = ar.choices[0].message.content.strip()
+                st.rerun()
+            except Exception as e:
+                st.error(f"ATS scoring failed: {e}")
+
+
 def parse_ats(raw: str) -> dict:
     def pf(lbl):
         m = re.search(rf"{lbl}:\s*([\d.]+)", raw)
