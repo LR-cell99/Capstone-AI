@@ -261,14 +261,42 @@ OUTPUT: Clean plain text with section labels. Skip missing sections. When in dou
 _ATS_RULES = """
 STEP 0 — VALIDATE JD: If JD lacks real hiring content (Wikipedia, generic pages, all "Not applicable"), set all scores to 0, SUMMARY to "Invalid job description", IMPROVEMENTS to "Upload a real job posting", and stop.
 
-SCORING (valid JD only) — NO minimum score. 60+ = PASS. Below 60 = FAIL. Score only what is in the resume.
-- Keyword Match (30): Missing >half critical keywords=0-10, most loosely present=11-20, strong alignment=21-30
-- Relevance of Experience (25): Different field=0-8, some relevant but gaps=9-16, directly maps=17-25
-- Qualifications Match (20): Missing required degree=deduct 10+, wrong field=deduct 8, meets all=17-20
-- Resume Clarity (15): Vague/passive=0-5, inconsistent=6-10, strong throughout=11-15
-- ATS Formatting (10): Clean plain text=8-10, minor issues=5-7, tables/columns=0-4
+SCORING (valid JD only):
+- There is NO minimum and NO maximum anchor. Scores range freely from 0 to 100.
+- A resume that is an excellent match for the JD SHOULD score 80-95+. Do not hold back high scores when genuinely earned.
+- 60+ = PASS. Below 60 = FAIL. But a great resume can score 75, 85, or 95 — score what you actually see.
+- Score only what is in the resume. Do NOT give benefit of the doubt for weak content. Do NOT hold back for strong content.
 
-TOTAL_SCORE = exact sum of all five.
+KEYWORD MATCH (30 pts):
+- 0-10: Missing more than half the critical JD keywords
+- 11-18: Most keywords loosely present, some critical ones missing
+- 19-24: Strong keyword presence, minor gaps only
+- 25-30: Excellent — nearly all JD keywords and SkillsFuture terms present, naturally integrated
+
+RELEVANCE OF EXPERIENCE (25 pts):
+- 0-8: Different field or only loosely related
+- 9-15: Some relevant experience, significant gaps
+- 16-20: Experience clearly maps to role responsibilities
+- 21-25: Excellent — experience directly and comprehensively addresses the JD responsibilities
+
+QUALIFICATIONS MATCH (20 pts):
+- 0-8: Missing required degree or certification, wrong field
+- 9-13: Partially meets requirements
+- 14-17: Meets core requirements
+- 18-20: Excellent — fully meets or exceeds all stated qualifications and preferred requirements
+
+RESUME CLARITY & STRUCTURE (15 pts):
+- 0-5: Vague, passive language, no action verbs, no results
+- 6-9: Some strong language but inconsistent
+- 10-12: Consistently strong language, good structure
+- 13-15: Excellent — strong action verbs throughout, quantified results, tightly targeted summary
+
+ATS FORMATTING COMPLIANCE (10 pts):
+- 0-4: Tables, columns, or special characters present
+- 5-7: Minor formatting issues
+- 8-10: Clean plain text, standard headers, consistent dates
+
+TOTAL_SCORE = exact sum of all five categories.
 
 Respond ONLY in this format:
 TOTAL_SCORE: <n>
@@ -277,14 +305,28 @@ RELEVANCE_OF_EXPERIENCE: <n>/25
 QUALIFICATIONS_MATCH: <n>/20
 RESUME_CLARITY: <n>/15
 ATS_FORMATTING: <n>/10
-SUMMARY: <2-3 sentences, name specific missing keywords or mismatches>
+SUMMARY: <2-3 sentences — be specific, name actual strengths AND weaknesses, name missing keywords if any>
 IMPROVEMENTS: <3 specific actionable bullet points referencing exact JD requirements>"""
 
-BASELINE_ATS_PROMPT = "You are a brutally honest ATS evaluator for Singapore. Score the ORIGINAL BASELINE resume — be consistent and conservative, this is the benchmark." + _ATS_RULES
+BASELINE_ATS_PROMPT = (
+    "You are a precise ATS evaluator for Singapore. Score the ORIGINAL BASELINE resume honestly. "
+    "This is the benchmark — score it for what it actually is, not what it could be. "
+    "A strong baseline resume against a well-matched JD can score 70, 80, or higher. Score freely across the full 0-100 range."
+) + _ATS_RULES
 BASELINE_ATS_TEMP   = 0.0
-ENHANCED_ATS_PROMPT = "You are a brutally honest ATS evaluator for Singapore. Score this AI-ENHANCED resume. If it uses more JD-aligned language, score higher. Do not inflate if not meaningfully better." + _ATS_RULES
-ENHANCED_ATS_TEMP   = 0.15
-RETRY_ATS_PROMPT    = "You are a strict ATS evaluator for Singapore. Quick regression check — penalise vague, generic, or poorly matched resumes." + _ATS_RULES
+
+ENHANCED_ATS_PROMPT = (
+    "You are a precise ATS evaluator for Singapore. Score this AI-ENHANCED resume against the JD. "
+    "Score freely across the full 0-100 range — do not anchor to 60 or any other number. "
+    "A resume that comprehensively addresses the JD with strong keywords, relevant experience, and clear structure SHOULD score 75-95+. "
+    "Score what you see: reward genuine alignment, penalise genuine gaps."
+) + _ATS_RULES
+ENHANCED_ATS_TEMP   = 0.0
+
+RETRY_ATS_PROMPT = (
+    "You are a strict ATS evaluator for Singapore. Quick regression check — score this resume against the JD. "
+    "Penalise vague or generic resumes. Reward strong JD alignment. Score freely from 0-100."
+) + _ATS_RULES
 RETRY_ATS_TEMP      = 0.0
 
 SKILLS_GAP_PROMPT = """You are a career coach and skills analyst for the Singapore job market.
