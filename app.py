@@ -203,7 +203,7 @@ EDUCATION: Keep factually intact.
 
 HALLUCINATION RULES: NEVER invent jobs, degrees, certifications, or skills with no basis in the original. Reframing existing content is NOT hallucination.
 
-OUTPUT RULES: Output ONLY the resume. No preamble, commentary, or explanation. No markdown. First character = candidate name. Last character = end of resume."""
+OUTPUT RULES: Output ONLY the resume. No preamble, commentary, or explanation. No markdown. First character = candidate name. Do not add any closing line or marker after the last line of resume content."""
 
 JD_EXTRACT_PROMPT = """You are a strict job description parser for Singapore job portals. Extract ONLY what a hiring manager actually wrote.
 
@@ -283,7 +283,7 @@ REVISION_PROMPT = """You are a professional resume editor. You will receive:
 Apply the requested revision carefully. Maintain the same structure and formatting.
 
 HALLUCINATION RULES: NEVER add skills, jobs, degrees, or certifications not in the resume.
-OUTPUT RULES: Output ONLY the revised resume. No preamble, no commentary, no explanation."""
+OUTPUT RULES: Output ONLY the revised resume. No preamble, no commentary, no explanation. Do not add any closing line, note, or marker after the last line of resume content."""
 
 # ── Session state ──────────────────────────────────────────────────────────────
 _SS_DEFAULTS = {
@@ -622,10 +622,10 @@ if st.session_state.enhanced_resume:
                     f"\n\n---\n\n## Job Description\n\n{st.session_state.jd_text}"
                     f"\n\n---\n\n## Revision Request\n\n{revision_input}"
                     f"\n\n---\n\n## IMPORTANT INSTRUCTION\n\n"
-                    f"If you cannot integrate the requested change naturally into the resume, "
-                    f"append a clearly marked section at the very end of the resume under the heading:\n"
-                    f"--- SUGGESTED ADDITIONS (please review and integrate manually) ---\n"
-                    f"List the changes or additions there so the candidate can place them manually."
+                    f"Integrate all requested changes directly into the resume body. "
+                    f"Do not append any separate section, note, or suggestion at the end. "
+                    f"If a skill is requested, add it to the Skills section. "
+                    f"Output only the complete revised resume with all changes integrated."
                 )
                 rev_resp = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
                     model=model, temperature=0.5, max_tokens=3500,
@@ -745,14 +745,26 @@ st.markdown('<div class="warn-box">⚠️ <strong>Always review the enhanced res
 
 if st.session_state.enhanced_resume:
     with st.expander("🔍 Debug — verify ATS inputs & raw scores"):
-        st.markdown("**Baseline input (first 800 chars):**")
-        st.text(st.session_state.resume_text[:800] + ("…" if len(st.session_state.resume_text) > 800 else ""))
-        st.markdown("**Enhanced input (first 800 chars):**")
-        st.text(st.session_state.enhanced_resume[:800] + ("…" if len(st.session_state.enhanced_resume) > 800 else ""))
-        st.markdown("**Raw baseline ATS:**"); st.code(st.session_state.baseline_ats_result or "None", language="text")
-        st.markdown("**Raw enhanced ATS:**"); st.code(st.session_state.ats_result or "None", language="text")
+        st.markdown("**Baseline resume (full text sent to ATS scorer):**")
+        st.text_area("Baseline", value=st.session_state.resume_text, height=200,
+                     key="debug_baseline", disabled=True, label_visibility="collapsed")
+        st.caption(f"{len(st.session_state.resume_text.split())} words")
+
+        st.markdown("**Enhanced resume (full text sent to ATS scorer):**")
+        st.text_area("Enhanced", value=st.session_state.enhanced_resume, height=200,
+                     key="debug_enhanced", disabled=True, label_visibility="collapsed")
+        st.caption(f"{len(st.session_state.enhanced_resume.split())} words")
+
+        st.markdown("**Raw baseline ATS response:**")
+        st.code(st.session_state.baseline_ats_result or "None", language="text")
+        st.markdown("**Raw enhanced ATS response:**")
+        st.code(st.session_state.ats_result or "None", language="text")
+
         same = st.session_state.resume_text == st.session_state.enhanced_resume
-        (st.error if same else st.success)("⚠️ Resumes are IDENTICAL — enhancer may not have run." if same else "✅ Resumes differ — enhancement applied.")
+        (st.error if same else st.success)(
+            "⚠️ Resumes are IDENTICAL — enhancer may not have run correctly." if same
+            else f"✅ Resumes differ — enhancement applied ({len(st.session_state.resume_text.split())} → {len(st.session_state.enhanced_resume.split())} words)."
+        )
 
 # ── Application Tracker ────────────────────────────────────────────────────────
 st.divider(); st.subheader("📋 Application Tracker")
@@ -782,21 +794,25 @@ with st.expander("💾 Select & save entry to Supabase"):
         si  = labels.index(sel)
         row = df_s.iloc[si]
 
+        # Version key based on selected index — forces Streamlit to re-render
+        # inputs with the correct row data when selection changes
+        vk = f"_v{si}"
+
         if st.button("🗑️ Delete this entry"):
             st.session_state.tracker_edit = df_s.drop(index=df_s.index[si]).reset_index(drop=True); st.rerun()
 
         st.divider(); st.markdown("**Review & edit before saving:**")
         c1, c2 = st.columns(2)
         with c1:
-            nc = st.text_input("Company", value=str(row.get("Company","NA") or "NA"), key="new_company")
-            nr = st.text_input("Role",    value=str(row.get("Role","NA") or "NA"),    key="new_role")
+            nc = st.text_input("Company", value=str(row.get("Company","NA") or "NA"), key=f"new_company{vk}")
+            nr = st.text_input("Role",    value=str(row.get("Role","NA") or "NA"),    key=f"new_role{vk}")
         with c2:
             try:   dv = pd.to_datetime(row.get("Date Applied", str(date.today()))).date()
             except: dv = date.today()
-            nd = st.date_input("Date Applied", value=dv, key="new_date")
+            nd = st.date_input("Date Applied", value=dv, key=f"new_date{vk}")
             sv = str(row.get("Status","Not Applied") or "Not Applied")
             ns = st.selectbox("Status", STATUS_OPTIONS,
-                              index=STATUS_OPTIONS.index(sv) if sv in STATUS_OPTIONS else 0, key="new_status")
+                              index=STATUS_OPTIONS.index(sv) if sv in STATUS_OPTIONS else 0, key=f"new_status{vk}")
 
         st.info(f"📋 **Will save:** {nc} | {nr} | {nd} | {ns}")
         if st.button("✅ Confirm & Save to Supabase"):
