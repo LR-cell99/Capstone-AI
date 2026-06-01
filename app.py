@@ -170,6 +170,14 @@ def clean_jd(raw: str) -> str:
              if not any(re.search(p, l.strip()) for p in _NOISE)]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
+def clean_field_value(val: str) -> str:
+    """Strip parenthetical expansions and extra whitespace from extracted field values.
+    e.g. 'SSMC (Systems on Silicon Manufacturing Company Pte. Ltd.)' -> 'SSMC'
+    """
+    val = re.sub(r"\s*\(.*?\)", "", val).strip()  # Remove anything in parentheses
+    val = re.sub(r"\s{2,}", " ", val)               # Collapse multiple spaces
+    return val.strip()
+
 def parse_jd_field(text: str, labels: list) -> str:
     lines = text.split("\n")
     for i, line in enumerate(lines):
@@ -177,11 +185,12 @@ def parse_jd_field(text: str, labels: list) -> str:
         for pat in labels:
             if re.match(pat + r"\s*[:\-]\s*.+", line, re.I):
                 v = re.sub(pat + r"\s*[:\-]\s*", "", line, flags=re.I).strip()
+                v = clean_field_value(v)
                 if v and v.lower() not in ("na", "not applicable", "none", ""):
                     return v
             if re.match(pat + r"\s*[:\-]?\s*$", line, re.I):
                 for nxt in lines[i+1:i+3]:
-                    nxt = nxt.strip()
+                    nxt = clean_field_value(nxt.strip())
                     if nxt and not re.match(r"(?i)^(job title|role|position|key responsibilities|required|preferred|company name|company|about)", nxt):
                         if nxt.lower() not in ("na", "not applicable", "none", ""):
                             return nxt
@@ -800,7 +809,19 @@ if st.session_state.enhanced_resume:
                     "request": revision_input,
                     "timestamp": ts_rev,
                 })
-                st.success("✅ Revision applied — review the output above. Run ATS Score to re-evaluate.")
+
+                # Re-run skills gap on the revised resume so it reflects current state
+                try:
+                    gap_content = f"## Resume\n\n{revised}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
+                    gr = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                        model="gpt-4o-mini", temperature=0.0, max_tokens=800,
+                        messages=[{"role":"system","content":SKILLS_GAP_PROMPT},
+                                  {"role":"user","content":gap_content}])
+                    st.session_state.skills_gap = gr.choices[0].message.content.strip()
+                except Exception:
+                    pass  # Keep old skills gap if update fails
+
+                st.success("✅ Revision applied — skills gap updated. Run ATS Score to re-evaluate.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Revision failed: {e}")
