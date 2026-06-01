@@ -191,17 +191,55 @@ def parse_jd_field(text: str, labels: list) -> str:
 # ── Prompts ────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a senior professional resume writer for the Singapore job market. Edit the candidate's resume to better align it with the job description — not a full rewrite.
 
-GOAL: The enhanced resume must feel like the same person wrote it, with sharper language, better JD alignment, and stronger framing. Preserve voice and actual experience. Only change what needs changing.
+GOAL: The enhanced resume must feel like the same person wrote it, with sharper language, better JD alignment, and stronger framing. Preserve the candidate's authentic voice and actual experience. Only change what needs changing — but everything that can be aligned to the JD, should be.
 
-STEP 1 — ANALYSE: Read the full resume. Note what is already strong — minimal or no change needed there. Extract every keyword and requirement from the JD. Identify: which bullets are vague/passive? Which JD keywords are missing? Which skills use different terminology?
+STEP 1 — ANALYSE BEFORE EDITING:
+- Read every section of the resume fully.
+- Extract from the JD: role title, key responsibilities, required skills, preferred skills, industry context, and any repeated terminology.
+- For every section of the resume, ask: does the language, framing, and emphasis reflect what this JD is looking for?
+- Note what is already strong and JD-aligned — leave those parts alone.
+- Identify everything that can be reworded, reframed, or reordered to better reflect the JD — without adding anything that isn't there.
 
-STEP 2 — TARGETED EDITING:
-SUMMARY: Use original as foundation. Weave in the JD job title, 2-3 key JD skill terms, industry context. Keep same structure and length.
-EXPERIENCE BULLETS: Strong and JD-relevant bullets — keep with minor polish. Vague or passive bullets — rewrite using: [Strong verb] + [what] + [how] + [result]. Use exact JD terminology. Add implied results where context supports it.
-SKILLS: Reorder by JD priority. Use JD's exact terminology. Only add skills the work experience clearly demonstrates.
-EDUCATION: Keep factually intact.
+STEP 2 — TARGETED EDITING BY SECTION:
 
-HALLUCINATION RULES: NEVER invent jobs, degrees, certifications, or skills with no basis in the original. Reframing existing content is NOT hallucination.
+EXECUTIVE SUMMARY / PROFESSIONAL PROFILE:
+- Use the original as your foundation — do not discard the candidate's intent.
+- Rewrite to open with the JD's exact job title or a close variant.
+- Naturally embed 3-5 JD keywords and the industry context (e.g. semiconductor, manufacturing, automation).
+- Ensure the tone and focus reflects what the JD prioritises — if the JD emphasises cross-functional collaboration, the summary should mention it; if it emphasises technical depth, lead with that.
+- Keep the same general length. The candidate should recognise their own summary.
+
+WORK EXPERIENCE BULLETS:
+- Bullets already strong and JD-relevant — keep with light polish only.
+- Vague, passive, or JD-misaligned bullets — rewrite using: [Strong verb] + [what you did] + [how/with what] + [result or impact].
+- Use the JD's exact terminology where applicable (e.g. "root cause analysis" not "finding problems", "preventive maintenance" not "machine upkeep").
+- Add a reasonable result where none exists and context supports it — do not fabricate numbers not supported by the original.
+- Strong verbs: Executed, Implemented, Collaborated, Optimised, Reduced, Troubleshot, Calibrated, Validated, Coordinated, Monitored, Analysed, Resolved, Streamlined, Facilitated, Engineered, Delivered, Spearheaded.
+
+PROJECTS:
+- If the resume has a projects section, reframe each project description to emphasise aspects most relevant to the JD.
+- Highlight technologies, methodologies, or outcomes that align with what the JD requires.
+- If a project used a skill the JD values, make that skill prominent in the description.
+- Do not change the project name, tech stack, or outcomes — only the framing and emphasis.
+
+ACHIEVEMENTS / AWARDS / CERTIFICATIONS:
+- Reorder to place JD-relevant achievements first.
+- Reword achievement descriptions to use JD language where applicable.
+- Keep all facts intact — only rephrase, never fabricate.
+
+SKILLS:
+- Reorder so JD-critical skills appear first.
+- Where a skill is named differently from the JD equivalent, use the JD's exact terminology.
+- Only add a skill if the candidate's work experience or projects clearly demonstrate it.
+
+EDUCATION:
+- Keep factually intact. No changes unless a certification or qualification directly matches a JD requirement — in that case, make sure it is prominently visible.
+
+HALLUCINATION RULES — non-negotiable:
+- NEVER invent a job, company, project, degree, certification, or skill not in the original resume.
+- NEVER fabricate metrics, outcomes, or achievements.
+- Reframing, rewording, reordering, and re-emphasising existing content is encouraged and is NOT hallucination.
+- You may make implied results explicit if the original context supports them.
 
 OUTPUT RULES: Output ONLY the resume. No preamble, commentary, or explanation. No markdown. First character = candidate name. Do not add any closing line or marker after the last line of resume content."""
 
@@ -367,8 +405,20 @@ with col_resume:
         if rf:
             t = extract_file(rf)
             if t:
-                st.session_state.resume_text = t; st.session_state.base_resume_name = rf.name
-                st.success(f"✅ Using **{rf.name}**")
+                st.session_state.resume_text = t
+                st.session_state.base_resume_name = rf.name
+                # New resume — clear version history and all results
+                st.session_state.resume_versions = []
+                st.session_state.ats_score_cache = {}
+                st.session_state.active_version_idx = 0
+                st.session_state.enhanced_resume = ""
+                st.session_state.edited_resume = ""
+                st.session_state.ats_result = None
+                st.session_state.baseline_ats_result = None
+                st.session_state.skills_gap = None
+                st.session_state.revision_history = []
+                st.session_state.revision_version = 0
+                st.success(f"✅ Using **{rf.name}** — previous enhancements cleared.")
             else:
                 st.error("Could not extract text.")
 
@@ -392,6 +442,17 @@ with col_jd:
             st.session_state.jd_editable_value = ai_jd
             st.session_state.jd_filename = jf.name
             st.session_state.jd_widget_version += 1
+            # New JD — clear version history and all results
+            st.session_state.resume_versions = []
+            st.session_state.ats_score_cache = {}
+            st.session_state.active_version_idx = 0
+            st.session_state.enhanced_resume = ""
+            st.session_state.edited_resume = ""
+            st.session_state.ats_result = None
+            st.session_state.baseline_ats_result = None
+            st.session_state.skills_gap = None
+            st.session_state.revision_history = []
+            st.session_state.revision_version = 0
             st.success(f"✅ JD processed from **{jf.name}**")
         else:
             st.error("Could not extract text.")
@@ -488,14 +549,19 @@ if enhance_clicked:
                         break
 
                 st.session_state.enhanced_resume = enhanced
-                # Store as version 0 — original enhancement
+                # Store as version 0 — label includes company and role from JD
+                wk0 = f"jd_editable_{st.session_state.jd_widget_version}"
+                src0 = st.session_state.get(wk0, st.session_state.jd_text)
+                v0_company = parse_jd_field(src0, [r"(?i)company name", r"(?i)company"])
+                v0_role    = parse_jd_field(src0, [r"(?i)job title", r"(?i)role", r"(?i)position"])
+                v0_label   = f"Original — {v0_company} | {v0_role}" if v0_company != "NA" or v0_role != "NA" else "Original Enhancement"
                 st.session_state.resume_versions = [{
-                    "label": "Original Enhancement",
+                    "label": v0_label,
                     "content": enhanced,
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 }]
                 st.session_state.active_version_idx = 0
-                st.session_state.ats_score_cache = {}  # Clear cache for new JD
+                st.session_state.ats_score_cache = {}  # Clear cache for new JD/resume
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
                 ts = datetime.now().strftime("%Y-%m-%d_%H%M")
                 (Path(output_dir) / f"enhanced_{ts}.txt").write_text(enhanced, encoding="utf-8")
