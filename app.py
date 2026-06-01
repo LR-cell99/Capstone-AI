@@ -390,7 +390,7 @@ _SS_DEFAULTS = {
     "enhanced_resume": "", "edited_resume": "", "_last_enhanced": "",
     "jd_text": "", "jd_filename": "", "jd_editable_value": "",
     "jd_widget_version": 0, "ats_result": None, "baseline_ats_result": None,
-    "enhance_count": 0, "is_enhancing": False,
+    "enhance_count": 0, "is_enhancing": False, "override_resume_name": "", "override_resume_name": "",
     "skills_gap": None, "revision_history": [], "revision_version": 0,
     "resume_versions": [], "ats_score_cache": {}, "active_version_idx": 0,
     "resume_versions": [], "ats_score_cache": {}, "active_version_idx": 0, "revision_version": 0,
@@ -447,21 +447,48 @@ with st.sidebar:
 col_resume, col_jd = st.columns(2)
 
 with col_resume:
-    st.subheader("📎 Base Resume")
-    if st.session_state.resume_text:
-        n = st.session_state.base_resume_name or "manually entered"
-        st.success(f"✅ Loaded **{n}** ({len(st.session_state.resume_text.split())} words)")
-        with st.expander("Preview base resume"):
+    st.subheader("📎 Resume")
+
+    # Show override resume info if one is uploaded, hide base resume
+    if st.session_state.override_resume_name:
+        st.success(f"✅ Using override: **{st.session_state.override_resume_name}** ({len(st.session_state.resume_text.split())} words)")
+        with st.expander("Preview override resume"):
             st.text(st.session_state.resume_text[:1500] + ("…" if len(st.session_state.resume_text) > 1500 else ""))
-        if st.button("🔄 Reload from base_resume/"):
+        if st.button("↩ Revert to base_resume/"):
             t, n = load_base_resume()
             if t:
-                st.session_state.resume_text = t; st.session_state.base_resume_name = n; st.rerun()
+                st.session_state.resume_text = t
+                st.session_state.base_resume_name = n
+                st.session_state.override_resume_name = ""
+                st.session_state.resume_versions = []
+                st.session_state.ats_score_cache = {}
+                st.session_state.active_version_idx = 0
+                st.session_state.enhanced_resume = ""
+                st.session_state.edited_resume = ""
+                st.session_state.ats_result = None
+                st.session_state.baseline_ats_result = None
+                st.session_state.skills_gap = None
+                st.session_state.revision_history = []
+                st.session_state.revision_version = 0
+                st.rerun()
             else:
                 st.error("No resume found in base_resume/.")
     else:
-        st.warning("⚠️ No resume found in `base_resume/` folder.")
-        st.caption("Place your resume (PDF, DOCX, or TXT) in `base_resume/` next to app.py.")
+        if st.session_state.resume_text:
+            n = st.session_state.base_resume_name or "manually entered"
+            st.success(f"✅ Loaded **{n}** ({len(st.session_state.resume_text.split())} words)")
+            with st.expander("Preview base resume"):
+                st.text(st.session_state.resume_text[:1500] + ("…" if len(st.session_state.resume_text) > 1500 else ""))
+            if st.button("🔄 Reload from base_resume/"):
+                t, n = load_base_resume()
+                if t:
+                    st.session_state.resume_text = t; st.session_state.base_resume_name = n; st.rerun()
+                else:
+                    st.error("No resume found in base_resume/.")
+        else:
+            st.warning("⚠️ No resume found in `base_resume/` folder.")
+            st.caption("Place your resume (PDF, DOCX, or TXT) in `base_resume/` next to app.py.")
+
     with st.expander("Override: upload a different resume"):
         rf = st.file_uploader("Upload resume", type=["pdf","docx","txt"], label_visibility="collapsed", key="resume_upload")
         if rf:
@@ -469,6 +496,7 @@ with col_resume:
             if t:
                 st.session_state.resume_text = t
                 st.session_state.base_resume_name = rf.name
+                st.session_state.override_resume_name = rf.name
                 # New resume — clear version history and all results
                 st.session_state.resume_versions = []
                 st.session_state.ats_score_cache = {}
@@ -853,12 +881,10 @@ if st.session_state.enhanced_resume:
 
     if run_ats:
         current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
-        # Cache key = hash of resume content + JD — same content always returns same score
         cache_key = hashlib.md5((current_resume + st.session_state.jd_text).encode()).hexdigest()
         if cache_key in st.session_state.ats_score_cache:
             st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
             st.info("ℹ️ Score retrieved from cache — same resume content returns the same score.")
-            st.rerun()
         else:
             with st.spinner("Scoring enhanced resume…"):
                 try:
@@ -872,7 +898,6 @@ if st.session_state.enhanced_resume:
                     result = ar.choices[0].message.content.strip()
                     st.session_state.ats_result = result
                     st.session_state.ats_score_cache[cache_key] = result
-                    st.rerun()
                 except Exception as e:
                     st.error(f"ATS scoring failed: {e}")
 
