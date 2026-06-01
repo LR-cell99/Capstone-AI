@@ -901,15 +901,11 @@ if st.session_state.enhanced_resume:
         )
 
 # ── Follow-up Revision Chat ────────────────────────────────────────────────────
-@st.fragment
-def revision_section():
-    if not st.session_state.enhanced_resume:
-      return
+if st.session_state.enhanced_resume:
     st.divider()
     st.subheader("💬 Request Further Revisions")
     st.caption("Ask for specific changes to the enhanced resume. Each revision updates the output above.")
 
-    # Show revision history
     if st.session_state.revision_history:
         with st.expander(f"📜 Revision history ({len(st.session_state.revision_history)} revision(s))", expanded=False):
             for i, entry in enumerate(st.session_state.revision_history, 1):
@@ -918,7 +914,7 @@ def revision_section():
 
     revision_input = st.text_area(
         "What would you like to change?",
-        placeholder="e.g. 'Make the summary more focused on automation engineering' or 'Strengthen the bullet points in the most recent job' or 'Remove mention of X and replace with Y'",
+        placeholder="e.g. 'Make the summary more focused on automation engineering' or 'Strengthen the bullet points in the most recent job'",
         height=100,
         key="revision_input",
     )
@@ -955,8 +951,7 @@ def revision_section():
                 )
                 revised = rev_resp.choices[0].message.content.strip()
 
-                # Store revision as a new version
-                rev_num = len(st.session_state.resume_versions)
+                rev_num = len([v for v in st.session_state.resume_versions if "Revision" in v["label"]]) + 1
                 ts_rev = datetime.now().strftime("%Y-%m-%d %H:%M")
                 st.session_state.resume_versions.append({
                     "label": f"Revision {rev_num}: {revision_input[:50]}{'…' if len(revision_input) > 50 else ''}",
@@ -976,7 +971,6 @@ def revision_section():
                     "timestamp": ts_rev,
                 })
 
-                # Re-run skills gap on the revised resume so it reflects current state
                 try:
                     gap_content = f"## Resume\n\n{revised}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
                     gr = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
@@ -985,14 +979,12 @@ def revision_section():
                                   {"role":"user","content":gap_content}])
                     st.session_state.skills_gap = gr.choices[0].message.content.strip()
                 except Exception:
-                    pass  # Keep old skills gap if update fails
+                    pass
 
                 st.success("✅ Revision applied — skills gap updated. Run ATS Score to re-evaluate.")
-                # revision_version increment already done above — Streamlit re-renders naturally
+                st.rerun()
             except Exception as e:
                 st.error(f"Revision failed: {e}")
-
-revision_section()
 
 # ── Application Tracker ────────────────────────────────────────────────────────
 st.divider(); st.subheader("📋 Application Tracker")
