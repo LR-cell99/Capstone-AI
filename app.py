@@ -116,35 +116,58 @@ def generate_pdf(text: str) -> bytes:
     line_h = 6
     indent = 5
 
-    def estimated_lines(txt, width, font_size=10):
-        """Estimate how many lines a string will wrap to."""
+    def est_lines(txt, width, font_size=10):
         pdf.set_font("Helvetica", "", font_size)
-        char_w = pdf.get_string_width("m")  # avg char width
+        char_w = pdf.get_string_width("m")
         chars_per_line = max(1, int(width / char_w))
         words = txt.split()
         lines, current = 1, 0
         for word in words:
             wlen = len(word) + 1
             if current + wlen > chars_per_line:
-                lines += 1
-                current = wlen
+                lines += 1; current = wlen
             else:
                 current += wlen
         return lines
 
-    def page_space_left():
-        """Remaining vertical space before bottom margin."""
+    def space_left():
         return pdf.h - pdf.b_margin - pdf.get_y()
 
-    for line in text.split("\n"):
-        s = sanitise(line.strip())
+    def block_height(lines_ahead):
+        """Estimate total height of a group of consecutive lines."""
+        total = 0
+        for ln in lines_ahead:
+            ln = ln.strip()
+            if not ln:
+                total += 3
+            elif ln.isupper() and len(ln) > 2:
+                total += 8 + 2 + 4
+            elif ln.startswith(("-", "*")):
+                total += est_lines(ln.lstrip("-* ").strip(), pw - indent - 4) * line_h + 2
+            elif len(ln) < 80 and not ln.endswith("."):
+                total += est_lines(ln, pw) * line_h + 1
+            else:
+                total += est_lines(ln, pw) * line_h + 1
+        return total
+
+    # Pre-sanitise all lines
+    all_lines = [sanitise(l) for l in text.split("\n")]
+
+    i = 0
+    while i < len(all_lines):
+        s = all_lines[i].strip()
+
         if not s:
-            pdf.ln(3); continue
+            pdf.ln(3); i += 1; continue
 
         if s.isupper() and len(s) > 2:
-            # Section header — keep on same page if possible
-            needed = 8 + 2 + 4  # header + rule + spacing
-            if page_space_left() < needed:
+            # Section header — check space for header + rule + at least first bullet
+            lookahead = []
+            j = i + 1
+            while j < len(all_lines) and len(lookahead) < 3:
+                lookahead.append(all_lines[j]); j += 1
+            needed = block_height([s] + lookahead)
+            if space_left() < min(needed, 30):
                 pdf.add_page()
             pdf.set_font("Helvetica", "B", 13); pdf.ln(3)
             pdf.set_x(pdf.l_margin)
@@ -153,12 +176,11 @@ def generate_pdf(text: str) -> bytes:
             pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + pw, pdf.get_y()); pdf.ln(2)
 
         elif s.startswith(("-", "*")):
-            # Bullet — estimate full height and keep together on same page
+            # Bullet — keep whole bullet together
             bullet_text = s.lstrip("-* ").strip()
             bullet_width = pw - indent - 4
-            n_lines = estimated_lines(bullet_text, bullet_width)
-            needed = n_lines * line_h + 2
-            if page_space_left() < needed:
+            needed = est_lines(bullet_text, bullet_width) * line_h + 2
+            if space_left() < needed:
                 pdf.add_page()
             pdf.set_font("Helvetica", "", 10)
             pdf.set_x(pdf.l_margin + indent)
@@ -166,10 +188,16 @@ def generate_pdf(text: str) -> bytes:
             pdf.multi_cell(bullet_width, line_h, bullet_text)
 
         elif len(s) < 80 and not s.endswith("."):
-            # Short bold line — company, title, date
-            n_lines = estimated_lines(s, pw, font_size=10)
-            needed = n_lines * line_h + 1
-            if page_space_left() < needed:
+            # Short bold line — group with following bullets on same page
+            lookahead = []
+            j = i + 1
+            while j < len(all_lines) and len(lookahead) < 4:
+                nxt = all_lines[j].strip()
+                if nxt.isupper() and len(nxt) > 2:
+                    break  # stop at next section header
+                lookahead.append(all_lines[j]); j += 1
+            needed = block_height([s] + lookahead)
+            if space_left() < min(needed, 25):
                 pdf.add_page()
             pdf.set_font("Helvetica", "B", 10)
             pdf.set_x(pdf.l_margin)
@@ -177,13 +205,14 @@ def generate_pdf(text: str) -> bytes:
 
         else:
             # Body text
-            n_lines = estimated_lines(s, pw)
-            needed = n_lines * line_h + 1
-            if page_space_left() < needed:
+            needed = est_lines(s, pw) * line_h + 1
+            if space_left() < needed:
                 pdf.add_page()
             pdf.set_font("Helvetica", "", 10)
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(pw, line_h, s)
+
+        i += 1
 
     return bytes(pdf.output())
 
