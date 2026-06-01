@@ -711,7 +711,6 @@ if st.session_state.enhanced_resume:
             st.session_state._last_enhanced = active_content
             st.session_state.revision_version += 1
             st.session_state.ats_result = None
-            st.rerun()
     else:
         if versions:
             st.caption(f"🔵 {versions[0]['label']} ({versions[0]['timestamp']})")
@@ -737,7 +736,8 @@ if st.session_state.enhanced_resume:
     with col3:
         if st.button("↺ Reset edits", use_container_width=True):
             active = versions[st.session_state.active_version_idx]["content"] if versions else st.session_state.enhanced_resume
-            st.session_state.edited_resume = active; st.rerun()
+            st.session_state.edited_resume = active
+            st.session_state.revision_version += 1
 else:
     st.markdown('<div class="output-box">Your enhanced resume will appear here after clicking Enhance Resume.</div>', unsafe_allow_html=True)
 
@@ -865,41 +865,7 @@ if st.session_state.enhanced_resume:
             except Exception as e:
                 st.error(f"Revision failed: {e}")
 
-# ── ATS Score display ──────────────────────────────────────────────────────────
-# Button-triggered scoring of enhanced/revised resume
-if st.session_state.enhanced_resume:
-    st.divider()
-    col_ats_btn, col_ats_info = st.columns([1, 5])
-    with col_ats_btn:
-        run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
-                            help="Score the current enhanced resume against the JD.")
-    with col_ats_info:
-        if st.session_state.ats_result:
-            st.caption("ATS score shown below. Click again after revisions to re-evaluate.")
-        else:
-            st.caption("Click to score your enhanced resume against the JD at any time — including after revisions.")
-
-    if run_ats:
-        current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
-        cache_key = hashlib.md5((current_resume + st.session_state.jd_text).encode()).hexdigest()
-        if cache_key in st.session_state.ats_score_cache:
-            st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
-            st.info("ℹ️ Score retrieved from cache — same resume content returns the same score.")
-        else:
-            with st.spinner("Scoring enhanced resume…"):
-                try:
-                    ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-                        model="gpt-4o-mini", temperature=0.0, max_tokens=600,
-                        messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
-                                  {"role":"user","content":(
-                                      f"## Enhanced Resume\n\n{current_resume}"
-                                      f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
-                                  )}])
-                    result = ar.choices[0].message.content.strip()
-                    st.session_state.ats_result = result
-                    st.session_state.ats_score_cache[cache_key] = result
-                except Exception as e:
-                    st.error(f"ATS scoring failed: {e}")
+# ── ATS Score button — placed after output and revisions to avoid reset ───────
 
 
 def parse_ats(raw: str) -> dict:
@@ -961,6 +927,41 @@ if st.session_state.ats_result:
                     if l: st.markdown(f"- {l}")
 
 st.markdown('<div class="warn-box">⚠️ <strong>Always review the enhanced resume carefully.</strong> AI may occasionally embellish skills or experience — validate before applying.</div>', unsafe_allow_html=True)
+
+# ── ATS Score button + display ─────────────────────────────────────────────────
+if st.session_state.enhanced_resume:
+    st.divider()
+    col_ats_btn, col_ats_info = st.columns([1, 5])
+    with col_ats_btn:
+        run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
+                            help="Score the current enhanced resume against the JD.")
+    with col_ats_info:
+        if st.session_state.ats_result:
+            st.caption("ATS score shown below. Click again after revisions to re-evaluate.")
+        else:
+            st.caption("Click to score your enhanced resume — including after revisions.")
+
+    if run_ats:
+        current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
+        cache_key = hashlib.md5((current_resume + st.session_state.jd_text).encode()).hexdigest()
+        if cache_key in st.session_state.ats_score_cache:
+            st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
+            st.info("ℹ️ Score retrieved from cache — same resume content always returns the same score.")
+        else:
+            with st.spinner("Scoring enhanced resume…"):
+                try:
+                    ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                        model="gpt-4o-mini", temperature=0.0, max_tokens=600,
+                        messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
+                                  {"role":"user","content":(
+                                      f"## Enhanced Resume\n\n{current_resume}"
+                                      f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
+                                  )}])
+                    result = ar.choices[0].message.content.strip()
+                    st.session_state.ats_result = result
+                    st.session_state.ats_score_cache[cache_key] = result
+                except Exception as e:
+                    st.error(f"ATS scoring failed: {e}")
 
 if st.session_state.enhanced_resume:
     with st.expander("🔍 Debug — verify ATS inputs & raw scores"):
