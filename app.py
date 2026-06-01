@@ -1,5 +1,5 @@
 import streamlit as st
-import openai, os, re, io
+import openai, os, re, io, hashlib, hashlib
 from datetime import date, datetime
 from pathlib import Path
 import pandas as pd
@@ -291,7 +291,9 @@ _SS_DEFAULTS = {
     "jd_text": "", "jd_filename": "", "jd_editable_value": "",
     "jd_widget_version": 0, "ats_result": None, "baseline_ats_result": None,
     "enhance_count": 0, "is_enhancing": False,
-    "skills_gap": None, "revision_history": [], "revision_version": 0, "revision_version": 0,
+    "skills_gap": None, "revision_history": [], "revision_version": 0,
+    "resume_versions": [], "ats_score_cache": {}, "active_version_idx": 0,
+    "resume_versions": [], "ats_score_cache": {}, "active_version_idx": 0, "revision_version": 0,
 }
 for k, v in _SS_DEFAULTS.items():
     if k not in st.session_state:
@@ -486,6 +488,14 @@ if enhance_clicked:
                         break
 
                 st.session_state.enhanced_resume = enhanced
+                # Store as version 0 — original enhancement
+                st.session_state.resume_versions = [{
+                    "label": "Original Enhancement",
+                    "content": enhanced,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                }]
+                st.session_state.active_version_idx = 0
+                st.session_state.ats_score_cache = {}  # Clear cache for new JD
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
                 ts = datetime.now().strftime("%Y-%m-%d_%H%M")
                 (Path(output_dir) / f"enhanced_{ts}.txt").write_text(enhanced, encoding="utf-8")
@@ -523,13 +533,38 @@ if enhance_clicked:
 # ── Output ─────────────────────────────────────────────────────────────────────
 st.divider()
 st.subheader("Enhanced Resume Output")
-st.caption("Edit directly before exporting.")
 
 if st.session_state.enhanced_resume:
+    # ── Version switcher ──
+    versions = st.session_state.resume_versions
+    if len(versions) > 1:
+        version_labels = [f"{'🔵' if i == 0 else '✏️'} {v['label']} ({v['timestamp']})"
+                          for i, v in enumerate(versions)]
+        selected_v = st.selectbox(
+            "Select version to view / download:",
+            version_labels,
+            index=st.session_state.active_version_idx,
+            key=f"version_select_{len(versions)}",
+        )
+        new_idx = version_labels.index(selected_v)
+        if new_idx != st.session_state.active_version_idx:
+            st.session_state.active_version_idx = new_idx
+            active_content = versions[new_idx]["content"]
+            st.session_state.edited_resume = active_content
+            st.session_state.enhanced_resume = active_content
+            st.session_state._last_enhanced = active_content
+            st.session_state.revision_version += 1
+            st.session_state.ats_result = None
+            st.rerun()
+    else:
+        if versions:
+            st.caption(f"🔵 {versions[0]['label']} ({versions[0]['timestamp']})")
+
     if st.session_state.get("_last_enhanced") != st.session_state.enhanced_resume:
         st.session_state.edited_resume = st.session_state.enhanced_resume
         st.session_state._last_enhanced = st.session_state.enhanced_resume
 
+    st.caption("Edit directly below before exporting.")
     edited = st.text_area("Edit resume", label_visibility="collapsed",
                           value=st.session_state.edited_resume, height=500,
                           key=f"editable_output_{st.session_state.revision_version}",
@@ -545,7 +580,8 @@ if st.session_state.enhanced_resume:
                            file_name=f"enhanced_resume_{date.today()}.pdf", mime="application/pdf", use_container_width=True)
     with col3:
         if st.button("↺ Reset edits", use_container_width=True):
-            st.session_state.edited_resume = st.session_state.enhanced_resume; st.rerun()
+            active = versions[st.session_state.active_version_idx]["content"] if versions else st.session_state.enhanced_resume
+            st.session_state.edited_resume = active; st.rerun()
 else:
     st.markdown('<div class="output-box">Your enhanced resume will appear here after clicking Enhance Resume.</div>', unsafe_allow_html=True)
 
@@ -636,17 +672,25 @@ if st.session_state.enhanced_resume:
                 )
                 revised = rev_resp.choices[0].message.content.strip()
 
-                # Update both enhanced_resume and edited_resume and bump version
-                # so the text area widget re-renders with the new content
+                # Store revision as a new version
+                rev_num = len(st.session_state.resume_versions)
+                ts_rev = datetime.now().strftime("%Y-%m-%d %H:%M")
+                st.session_state.resume_versions.append({
+                    "label": f"Revision {rev_num}: {revision_input[:50]}{'…' if len(revision_input) > 50 else ''}",
+                    "content": revised,
+                    "timestamp": ts_rev,
+                })
+                new_idx = len(st.session_state.resume_versions) - 1
+                st.session_state.active_version_idx = new_idx
                 st.session_state.enhanced_resume = revised
                 st.session_state.edited_resume = revised
                 st.session_state._last_enhanced = revised
                 st.session_state.revision_version += 1
-                st.session_state.ats_result = None  # Clear old score — needs re-run
+                st.session_state.ats_result = None
 
                 st.session_state.revision_history.append({
                     "request": revision_input,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "timestamp": ts_rev,
                 })
                 st.success("✅ Revision applied — review the output above. Run ATS Score to re-evaluate.")
                 st.rerun()
@@ -668,19 +712,29 @@ if st.session_state.enhanced_resume:
             st.caption("Click to score your enhanced resume against the JD at any time — including after revisions.")
 
     if run_ats:
-        with st.spinner("Scoring enhanced resume…"):
-            try:
-                ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-                    model="gpt-4o-mini", temperature=ENHANCED_ATS_TEMP, max_tokens=600,
-                    messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
-                              {"role":"user","content":(
-                                  f"## Enhanced Resume\n\n{st.session_state.edited_resume or st.session_state.enhanced_resume}"
-                                  f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
-                              )}])
-                st.session_state.ats_result = ar.choices[0].message.content.strip()
-                st.rerun()
-            except Exception as e:
-                st.error(f"ATS scoring failed: {e}")
+        current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
+        # Cache key = hash of resume content + JD — same content always returns same score
+        cache_key = hashlib.md5((current_resume + st.session_state.jd_text).encode()).hexdigest()
+        if cache_key in st.session_state.ats_score_cache:
+            st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
+            st.info("ℹ️ Score retrieved from cache — same resume content returns the same score.")
+            st.rerun()
+        else:
+            with st.spinner("Scoring enhanced resume…"):
+                try:
+                    ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                        model="gpt-4o-mini", temperature=0.0, max_tokens=600,
+                        messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
+                                  {"role":"user","content":(
+                                      f"## Enhanced Resume\n\n{current_resume}"
+                                      f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
+                                  )}])
+                    result = ar.choices[0].message.content.strip()
+                    st.session_state.ats_result = result
+                    st.session_state.ats_score_cache[cache_key] = result
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"ATS scoring failed: {e}")
 
 
 def parse_ats(raw: str) -> dict:
