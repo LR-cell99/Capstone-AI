@@ -491,7 +491,8 @@ with col_resume:
 
     with st.expander("Override: upload a different resume"):
         rf = st.file_uploader("Upload resume", type=["pdf","docx","txt"], label_visibility="collapsed", key="resume_upload")
-        if rf:
+        # Only process when a NEW file is uploaded — prevents re-clearing on every rerun
+        if rf and rf.name != st.session_state.override_resume_name:
             t = extract_file(rf)
             if t:
                 st.session_state.resume_text = t
@@ -722,7 +723,7 @@ if st.session_state.enhanced_resume:
     st.caption("Edit directly below before exporting.")
     edited = st.text_area("Edit resume", label_visibility="collapsed",
                           value=st.session_state.edited_resume, height=500,
-                          key=f"editable_output_{st.session_state.revision_version}",
+                          key="editable_output",
                           help="Edit here — changes apply to exports.")
     st.session_state.edited_resume = edited
 
@@ -737,7 +738,6 @@ if st.session_state.enhanced_resume:
         if st.button("↺ Reset edits", use_container_width=True):
             active = versions[st.session_state.active_version_idx]["content"] if versions else st.session_state.enhanced_resume
             st.session_state.edited_resume = active
-            st.session_state.revision_version += 1
 else:
     st.markdown('<div class="output-box">Your enhanced resume will appear here after clicking Enhance Resume.</div>', unsafe_allow_html=True)
 
@@ -775,8 +775,136 @@ if st.session_state.skills_gap and st.session_state.enhanced_resume:
             st.markdown(f"- {s}")
         if not irrel: st.caption("None identified")
 
-# ── Follow-up Revision Chat ────────────────────────────────────────────────────
+# ── ATS Score button — placed after output and revisions to avoid reset ───────
+
+
+def parse_ats(raw: str) -> dict:
+    def pf(lbl):
+        m = re.search(rf"{lbl}:\s*([\d.]+)", raw)
+        return float(m.group(1)) if m else None
+    ms = re.search(r"SUMMARY:\s*(.+?)(?=IMPROVEMENTS:|$)", raw, re.S)
+    mi = re.search(r"IMPROVEMENTS:\s*(.+?)$", raw, re.S)
+    return {"total":pf("TOTAL_SCORE"),"kw":pf("KEYWORD_MATCH"),"exp":pf("RELEVANCE_OF_EXPERIENCE"),
+            "qual":pf("QUALIFICATIONS_MATCH"),"clarity":pf("RESUME_CLARITY"),"formatting":pf("ATS_FORMATTING"),
+            "summary":ms.group(1).strip() if ms else "","improve":mi.group(1).strip() if mi else ""}
+
+def badge(total, label):
+    ok = total >= 60
+    c = "#2d5a3d" if ok else "#c0392b"; bg = "#e8f2eb" if ok else "#fde8e8"
+    return f'<div style="text-align:center;background:{bg};border:2px solid {c};border-radius:12px;padding:12px 20px"><div style="font-size:11px;color:{c};font-weight:600;margin-bottom:4px">{label}</div><div style="font-size:2.2rem;font-weight:800;color:{c};line-height:1">{int(total)}</div><div style="font-size:11px;color:{c}">/ 100</div><div style="font-size:11px;font-weight:700;color:{c};margin-top:4px">{"✅ PASS" if ok else "❌ BELOW PASSING"}</div></div>'
+
+def bars(scores, base=None):
+    cats = [("Keyword Match","kw",30),("Relevance of Experience","exp",25),
+            ("Qualifications Match","qual",20),("Resume Clarity","clarity",15),("ATS Formatting","formatting",10)]
+    html = ""
+    for name, key, mx in cats:
+        s = scores.get(key)
+        if s is None: continue
+        pct = int(s/mx*100)
+        bc = "#2d5a3d" if pct>=60 else "#e67e22" if pct>=40 else "#c0392b"
+        delta = ""
+        if base and (b := base.get(key)) is not None:
+            d = s - b; arrow = "▲" if d>0 else ("▼" if d<0 else "–")
+            dc = "#2d5a3d" if d>0 else ("#c0392b" if d<0 else "#888")
+            delta = f'<span style="color:{dc};font-size:12px;margin-left:8px">{arrow} {abs(d):.0f}</span>'
+        html += f'<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px"><span>{name}</span><span style="font-weight:600">{int(s)}/{mx}{delta}</span></div><div style="background:#e0dbd3;border-radius:6px;height:10px"><div style="width:{pct}%;background:{bc};border-radius:6px;height:10px"></div></div></div>'
+    return html
+
+st.markdown('<div class="warn-box">⚠️ <strong>Always review the enhanced resume carefully.</strong> AI may occasionally embellish skills or experience — validate before applying.</div>', unsafe_allow_html=True)
+
+# ── ATS Score button + display ─────────────────────────────────────────────────
+@st.fragment
+def ats_section():
+    if not st.session_state.enhanced_resume:
+        return
+    st.divider()
+    col_ats_btn, col_ats_info = st.columns([1, 5])
+    with col_ats_btn:
+        run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
+                            help="Score the current enhanced resume against the JD.")
+    with col_ats_info:
+        if st.session_state.ats_result:
+            st.caption("ATS score shown below. Click again after revisions to re-evaluate.")
+        else:
+            st.caption("Click to score your enhanced resume — including after revisions.")
+
+    if run_ats:
+        current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
+        cache_key = hashlib.md5((current_resume + st.session_state.jd_text).encode()).hexdigest()
+        if cache_key in st.session_state.ats_score_cache:
+            st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
+            st.info("ℹ️ Score retrieved from cache — same resume content always returns the same score.")
+        else:
+            with st.spinner("Scoring enhanced resume…"):
+                try:
+                    ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                        model="gpt-4o-mini", temperature=0.0, max_tokens=600,
+                        messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
+                                  {"role":"user","content":(
+                                      f"## Enhanced Resume\n\n{current_resume}"
+                                      f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
+                                  )}])
+                    result = ar.choices[0].message.content.strip()
+                    st.session_state.ats_result = result
+                    st.session_state.ats_score_cache[cache_key] = result
+                except Exception as e:
+                    st.error(f"ATS scoring failed: {e}")
+
+    # Show ATS results if available
+    if st.session_state.ats_result:
+        es = parse_ats(st.session_state.ats_result)
+        bs = parse_ats(st.session_state.baseline_ats_result) if st.session_state.baseline_ats_result else None
+        if es["total"] is not None:
+            if bs and bs["total"] is not None:
+                imp = es["total"] - bs["total"]
+                ic = "#2d5a3d" if imp > 0 else "#c0392b"
+                sign = "+" if imp > 0 else ""
+                c1, c2, c3 = st.columns(3)
+                c1.markdown(badge(bs["total"], "BASELINE RESUME"), unsafe_allow_html=True)
+                c2.markdown(badge(es["total"], "ENHANCED RESUME"), unsafe_allow_html=True)
+                c3.markdown(f'<div style="text-align:center;border:2px solid {ic};border-radius:12px;padding:12px 20px"><div style="font-size:11px;color:{ic};font-weight:600;margin-bottom:4px">IMPROVEMENT</div><div style="font-size:2.2rem;font-weight:800;color:{ic};line-height:1">{sign}{imp:.0f}</div><div style="font-size:11px;color:{ic}">points</div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown(badge(es["total"], "ENHANCED RESUME"), unsafe_allow_html=True)
+            st.write("")
+            with st.expander(f"📊 View score breakdown{' *(▲/▼ vs baseline)*' if bs else ''}"):
+                st.markdown(bars(es, bs), unsafe_allow_html=True)
+                if es["summary"]: st.markdown("**Summary**"); st.info(es["summary"])
+                if es["improve"]:
+                    st.markdown("**How to improve**")
+                    for l in es["improve"].split("\n"):
+                        l = l.strip().lstrip("-•* ").strip()
+                        if l: st.markdown(f"- {l}")
+
+ats_section()
+
 if st.session_state.enhanced_resume:
+    with st.expander("🔍 Debug — verify ATS inputs & raw scores"):
+        st.markdown("**Baseline resume (full text sent to ATS scorer):**")
+        st.text_area("Baseline", value=st.session_state.resume_text, height=200,
+                     key="debug_baseline", disabled=True, label_visibility="collapsed")
+        st.caption(f"{len(st.session_state.resume_text.split())} words")
+
+        st.markdown("**Enhanced resume (full text sent to ATS scorer):**")
+        st.text_area("Enhanced", value=st.session_state.enhanced_resume, height=200,
+                     key="debug_enhanced", disabled=True, label_visibility="collapsed")
+        st.caption(f"{len(st.session_state.enhanced_resume.split())} words")
+
+        st.markdown("**Raw baseline ATS response:**")
+        st.code(st.session_state.baseline_ats_result or "None", language="text")
+        st.markdown("**Raw enhanced ATS response:**")
+        st.code(st.session_state.ats_result or "None", language="text")
+
+        same = st.session_state.resume_text == st.session_state.enhanced_resume
+        (st.error if same else st.success)(
+            "⚠️ Resumes are IDENTICAL — enhancer may not have run correctly." if same
+            else f"✅ Resumes differ — enhancement applied ({len(st.session_state.resume_text.split())} → {len(st.session_state.enhanced_resume.split())} words)."
+        )
+
+# ── Follow-up Revision Chat ────────────────────────────────────────────────────
+@st.fragment
+def revision_section():
+    if not st.session_state.enhanced_resume:
+      return
     st.divider()
     st.subheader("💬 Request Further Revisions")
     st.caption("Ask for specific changes to the enhanced resume. Each revision updates the output above.")
@@ -803,7 +931,6 @@ if st.session_state.enhanced_resume:
         if st.button("↺ Clear History", use_container_width=True):
             st.session_state.revision_history = []
             st.session_state.edited_resume = st.session_state.enhanced_resume
-            st.session_state.revision_version += 1
 
     if apply_revision and revision_input.strip():
         with st.spinner("Applying revision…"):
@@ -865,126 +992,7 @@ if st.session_state.enhanced_resume:
             except Exception as e:
                 st.error(f"Revision failed: {e}")
 
-# ── ATS Score button — placed after output and revisions to avoid reset ───────
-
-
-def parse_ats(raw: str) -> dict:
-    def pf(lbl):
-        m = re.search(rf"{lbl}:\s*([\d.]+)", raw)
-        return float(m.group(1)) if m else None
-    ms = re.search(r"SUMMARY:\s*(.+?)(?=IMPROVEMENTS:|$)", raw, re.S)
-    mi = re.search(r"IMPROVEMENTS:\s*(.+?)$", raw, re.S)
-    return {"total":pf("TOTAL_SCORE"),"kw":pf("KEYWORD_MATCH"),"exp":pf("RELEVANCE_OF_EXPERIENCE"),
-            "qual":pf("QUALIFICATIONS_MATCH"),"clarity":pf("RESUME_CLARITY"),"formatting":pf("ATS_FORMATTING"),
-            "summary":ms.group(1).strip() if ms else "","improve":mi.group(1).strip() if mi else ""}
-
-def badge(total, label):
-    ok = total >= 60
-    c = "#2d5a3d" if ok else "#c0392b"; bg = "#e8f2eb" if ok else "#fde8e8"
-    return f'<div style="text-align:center;background:{bg};border:2px solid {c};border-radius:12px;padding:12px 20px"><div style="font-size:11px;color:{c};font-weight:600;margin-bottom:4px">{label}</div><div style="font-size:2.2rem;font-weight:800;color:{c};line-height:1">{int(total)}</div><div style="font-size:11px;color:{c}">/ 100</div><div style="font-size:11px;font-weight:700;color:{c};margin-top:4px">{"✅ PASS" if ok else "❌ BELOW PASSING"}</div></div>'
-
-def bars(scores, base=None):
-    cats = [("Keyword Match","kw",30),("Relevance of Experience","exp",25),
-            ("Qualifications Match","qual",20),("Resume Clarity","clarity",15),("ATS Formatting","formatting",10)]
-    html = ""
-    for name, key, mx in cats:
-        s = scores.get(key)
-        if s is None: continue
-        pct = int(s/mx*100)
-        bc = "#2d5a3d" if pct>=60 else "#e67e22" if pct>=40 else "#c0392b"
-        delta = ""
-        if base and (b := base.get(key)) is not None:
-            d = s - b; arrow = "▲" if d>0 else ("▼" if d<0 else "–")
-            dc = "#2d5a3d" if d>0 else ("#c0392b" if d<0 else "#888")
-            delta = f'<span style="color:{dc};font-size:12px;margin-left:8px">{arrow} {abs(d):.0f}</span>'
-        html += f'<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px"><span>{name}</span><span style="font-weight:600">{int(s)}/{mx}{delta}</span></div><div style="background:#e0dbd3;border-radius:6px;height:10px"><div style="width:{pct}%;background:{bc};border-radius:6px;height:10px"></div></div></div>'
-    return html
-
-if st.session_state.ats_result:
-    st.divider(); st.subheader("🎯 ATS Score")
-    st.caption("Passing score is 60/100 — Singapore ATS standards and SkillsFuture alignment.")
-    es = parse_ats(st.session_state.ats_result)
-    bs = parse_ats(st.session_state.baseline_ats_result) if st.session_state.baseline_ats_result else None
-    if es["total"] is not None:
-        if bs and bs["total"] is not None:
-            imp = es["total"] - bs["total"]
-            ic = "#2d5a3d" if imp > 0 else "#c0392b"
-            sign = "+" if imp > 0 else ""
-            c1, c2, c3 = st.columns(3)
-            c1.markdown(badge(bs["total"], "BASELINE RESUME"), unsafe_allow_html=True)
-            c2.markdown(badge(es["total"], "ENHANCED RESUME"), unsafe_allow_html=True)
-            c3.markdown(f'<div style="text-align:center;border:2px solid {ic};border-radius:12px;padding:12px 20px"><div style="font-size:11px;color:{ic};font-weight:600;margin-bottom:4px">IMPROVEMENT</div><div style="font-size:2.2rem;font-weight:800;color:{ic};line-height:1">{sign}{imp:.0f}</div><div style="font-size:11px;color:{ic}">points</div></div>', unsafe_allow_html=True)
-        else:
-            st.markdown(badge(es["total"], "ENHANCED RESUME"), unsafe_allow_html=True)
-        st.write("")
-        with st.expander(f"📊 View score breakdown{' *(▲/▼ vs baseline)*' if bs else ''}"):
-            st.markdown(bars(es, bs), unsafe_allow_html=True)
-            if es["summary"]: st.markdown("**Summary**"); st.info(es["summary"])
-            if es["improve"]:
-                st.markdown("**How to improve**")
-                for l in es["improve"].split("\n"):
-                    l = l.strip().lstrip("-•* ").strip()
-                    if l: st.markdown(f"- {l}")
-
-st.markdown('<div class="warn-box">⚠️ <strong>Always review the enhanced resume carefully.</strong> AI may occasionally embellish skills or experience — validate before applying.</div>', unsafe_allow_html=True)
-
-# ── ATS Score button + display ─────────────────────────────────────────────────
-if st.session_state.enhanced_resume:
-    st.divider()
-    col_ats_btn, col_ats_info = st.columns([1, 5])
-    with col_ats_btn:
-        run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
-                            help="Score the current enhanced resume against the JD.")
-    with col_ats_info:
-        if st.session_state.ats_result:
-            st.caption("ATS score shown below. Click again after revisions to re-evaluate.")
-        else:
-            st.caption("Click to score your enhanced resume — including after revisions.")
-
-    if run_ats:
-        current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
-        cache_key = hashlib.md5((current_resume + st.session_state.jd_text).encode()).hexdigest()
-        if cache_key in st.session_state.ats_score_cache:
-            st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
-            st.info("ℹ️ Score retrieved from cache — same resume content always returns the same score.")
-        else:
-            with st.spinner("Scoring enhanced resume…"):
-                try:
-                    ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-                        model="gpt-4o-mini", temperature=0.0, max_tokens=600,
-                        messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
-                                  {"role":"user","content":(
-                                      f"## Enhanced Resume\n\n{current_resume}"
-                                      f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
-                                  )}])
-                    result = ar.choices[0].message.content.strip()
-                    st.session_state.ats_result = result
-                    st.session_state.ats_score_cache[cache_key] = result
-                except Exception as e:
-                    st.error(f"ATS scoring failed: {e}")
-
-if st.session_state.enhanced_resume:
-    with st.expander("🔍 Debug — verify ATS inputs & raw scores"):
-        st.markdown("**Baseline resume (full text sent to ATS scorer):**")
-        st.text_area("Baseline", value=st.session_state.resume_text, height=200,
-                     key="debug_baseline", disabled=True, label_visibility="collapsed")
-        st.caption(f"{len(st.session_state.resume_text.split())} words")
-
-        st.markdown("**Enhanced resume (full text sent to ATS scorer):**")
-        st.text_area("Enhanced", value=st.session_state.enhanced_resume, height=200,
-                     key="debug_enhanced", disabled=True, label_visibility="collapsed")
-        st.caption(f"{len(st.session_state.enhanced_resume.split())} words")
-
-        st.markdown("**Raw baseline ATS response:**")
-        st.code(st.session_state.baseline_ats_result or "None", language="text")
-        st.markdown("**Raw enhanced ATS response:**")
-        st.code(st.session_state.ats_result or "None", language="text")
-
-        same = st.session_state.resume_text == st.session_state.enhanced_resume
-        (st.error if same else st.success)(
-            "⚠️ Resumes are IDENTICAL — enhancer may not have run correctly." if same
-            else f"✅ Resumes differ — enhancement applied ({len(st.session_state.resume_text.split())} → {len(st.session_state.enhanced_resume.split())} words)."
-        )
+revision_section()
 
 # ── Application Tracker ────────────────────────────────────────────────────────
 st.divider(); st.subheader("📋 Application Tracker")
