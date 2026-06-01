@@ -326,7 +326,10 @@ st.divider()
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    st.success("✅ OpenAI API key loaded") if OPENAI_API_KEY else st.error("❌ OPENAI_API_KEY not found in .env")
+    if OPENAI_API_KEY:
+        st.success("✅ OpenAI API key loaded")
+    else:
+        st.error("❌ OPENAI_API_KEY not found in .env")
     if SUPABASE_URL and SUPABASE_ANON_KEY:
         st.success("✅ Supabase connected")
         st.caption(f"URL: `{SUPABASE_URL[:30]}…`")
