@@ -43,7 +43,8 @@ def sb_load() -> pd.DataFrame:
             "company": "Company", "role": "Role",
             "date_applied": "Date Applied", "status": "Status"})
         return df[[c for c in ["Company", "Role", "Date Applied", "Status", "id"] if c in df.columns]]
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ Could not load tracker from Supabase: {e}")
         return empty
 
 def sb_insert(company, role, date_applied, status) -> tuple[str | None, str | None]:
@@ -68,8 +69,8 @@ def sb_update(row_id, company, role, date_applied, status):
             "company": company, "role": role,
             "date_applied": str(date_applied), "status": status
         }).eq("id", row_id).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        st.warning(f"⚠️ Could not sync edit to Supabase: {e}")
 
 # ── Text extraction ────────────────────────────────────────────────────────────
 def extract_pdf(file) -> str:
@@ -311,23 +312,49 @@ EXECUTIVE SUMMARY / PROFESSIONAL PROFILE:
 - Ensure the tone and focus reflects what the JD prioritises — if the JD emphasises cross-functional collaboration, the summary should mention it; if it emphasises technical depth, lead with that.
 - Keep the same general length. The candidate should recognise their own summary.
 
-WORK EXPERIENCE BULLETS:
-- Bullets already strong and JD-relevant — keep with light polish only.
-- Vague, passive, or JD-misaligned bullets — rewrite using the CAR formula:
-  * C — Context: briefly state the situation, project, or scope
-  * A — Action: what YOU specifically did, opening with a strong verb
-  * R — Result: the outcome, impact, or value delivered
-  * Example: "Assisted in maintenance" → "Supported preventive maintenance of CNC machines (C), performing scheduled inspections and fault diagnosis (A), contributing to reduced unplanned downtime on the production line (R)"
-  * Not every bullet needs all three parts stated explicitly — but every bullet must have a clear Action and at least imply a Result.
-- Use the JD's exact terminology where applicable (e.g. "root cause analysis" not "finding problems", "preventive maintenance" not "machine upkeep").
-- Add a reasonable implied result where context supports it — do not fabricate specific numbers not in the original.
+WORK EXPERIENCE BULLETS — rewrite EVERY bullet using the CAR format with explicit labels. MANDATORY.
+Each bullet must be structured as three separate labelled lines:
+
+Context: [the situation, responsibility, team, equipment, or scope — 1 sentence]
+Action: [what YOU specifically did — strong verb, JD-aligned terminology, tools/methods named]
+Result: [outcome, impact, improvement, or value delivered — implied if not stated in original]
+
+BEFORE:
+"Assisted in maintenance tasks"
+
+AFTER:
+Context: Responsible for supporting maintenance operations across production-line equipment in a manufacturing environment.
+Action: Performed scheduled preventive maintenance, fault diagnosis, and component inspections using standard operating procedures and JD-relevant tools.
+Result: Contributed to reduced unplanned downtime and sustained equipment reliability across the production line.
+
+Rules:
+- Use the exact labels "Context:", "Action:", "Result:" on separate lines for every bullet. No exceptions.
+- ALL THREE labels must be present for every rewritten bullet.
+- Use the JD's exact terminology in the Action line (e.g. "root cause analysis", "preventive maintenance", "cross-functional collaboration").
+- Do not fabricate specific numbers. Implied results drawn from context are acceptable.
 - Strong verbs: Executed, Implemented, Collaborated, Optimised, Reduced, Troubleshot, Calibrated, Validated, Coordinated, Monitored, Analysed, Resolved, Streamlined, Facilitated, Engineered, Delivered, Spearheaded.
 
-PROJECTS:
-- If the resume has a projects section, reframe each project description to emphasise aspects most relevant to the JD.
-- Highlight technologies, methodologies, or outcomes that align with what the JD requires.
-- If a project used a skill the JD values, make that skill prominent in the description.
-- Do not change the project name, tech stack, or outcomes — only the framing and emphasis.
+PROJECTS — rewrite EVERY project description using the CAR format. MANDATORY, no exceptions.
+Each project entry must be structured with explicit labels on separate lines:
+
+Context: [what the project was, the problem it addressed, or its scope — 1-2 sentences]
+Action: [what YOU specifically did — strong verb, JD-relevant skills and tools named explicitly]
+Result: [what was built, achieved, demonstrated, or delivered]
+
+BEFORE:
+"Built a cleaning robot end effector"
+
+AFTER:
+Context: Developed a robotic end effector for a capstone project addressing automated cleaning of public dining surfaces in hawker centre environments.
+Action: Applied CAD modelling, materials evaluation, and iterative prototyping to design and test grip mechanisms, optimising for performance and durability.
+Result: Delivered a functional prototype that validated the feasibility of the automated cleaning solution for large-scale deployment.
+
+Rules:
+- Use the exact labels "Context:", "Action:", "Result:" on separate lines for every project entry.
+- ALL THREE labels must be present for every project. No exceptions.
+- Name JD-relevant technologies, tools, and methodologies explicitly in the Action line.
+- Do not change the project name, tech stack, or actual outcomes — only the framing and structure.
+- If a project has multiple separate deliverables, write one full CAR block per deliverable.
 
 ACHIEVEMENTS / AWARDS / CERTIFICATIONS:
 - Reorder to place JD-relevant achievements first.
@@ -627,13 +654,17 @@ with col_jd:
         if raw:
             pre = clean_jd(raw)
             try:
-                r = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                r = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=30.0).chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role":"system","content":JD_EXTRACT_PROMPT},{"role":"user","content":pre}],
                     temperature=0.0, max_tokens=1000)
                 ai_jd = r.choices[0].message.content.strip()
-            except Exception:
+            except openai.APITimeoutError:
                 ai_jd = pre
+                st.warning("⚠️ JD extraction timed out — using raw extracted text. Try again if the JD looks unclean.")
+            except Exception as e:
+                ai_jd = pre
+                st.warning(f"⚠️ AI JD extraction failed — using raw extracted text. Reason: {e}")
             st.session_state.jd_text = ai_jd
             st.session_state.jd_editable_value = ai_jd
             st.session_state.jd_filename = jf.name
@@ -693,7 +724,7 @@ if enhance_clicked:
         st.error("Please upload a job description.")
     else:
         st.session_state.is_enhancing = True
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        client = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=60.0)
 
         with st.spinner("Step 1/3 — Scoring baseline resume…"):
             try:
@@ -701,8 +732,9 @@ if enhance_clicked:
                     messages=[{"role":"system","content":BASELINE_ATS_PROMPT},
                               {"role":"user","content":f"## Resume\n\n{st.session_state.resume_text}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"}])
                 st.session_state.baseline_ats_result = r.choices[0].message.content.strip()
-            except Exception:
+            except Exception as e:
                 st.session_state.baseline_ats_result = None
+                st.warning(f"⚠️ Baseline ATS scoring failed: {e}")
 
         with st.spinner("Step 2/3 — Enhancing your resume…"):
             try:
@@ -733,7 +765,7 @@ if enhance_clicked:
                             qm = re.search(r"TOTAL_SCORE:\s*([\d.]+)", qr.choices[0].message.content)
                             if qm: cand_score = float(qm.group(1))
                         except Exception:
-                            pass
+                            pass  # Retry check failed — continue with attempt regardless
 
                     regressed = baseline_total and cand_score and cand_score < baseline_total
                     if attempt == 2 or (similarity < 0.80 and not regressed):
@@ -780,15 +812,18 @@ if enhance_clicked:
                     gr = client.chat.completions.create(model="gpt-4o-mini", temperature=0.0, max_tokens=800,
                         messages=[{"role":"system","content":SKILLS_GAP_PROMPT},{"role":"user","content":gap_content}])
                     st.session_state.skills_gap = gr.choices[0].message.content.strip()
-                except Exception:
+                except Exception as e:
                     st.session_state.skills_gap = None
+                    st.warning(f"⚠️ Skills gap analysis failed: {e}")
 
             except openai.AuthenticationError:
-                st.error("Invalid API key.")
+                st.error("❌ Invalid API key — check OPENAI_API_KEY in your .env file.")
             except openai.RateLimitError:
-                st.error("Rate limit hit — please wait and try again.")
+                st.error("❌ Rate limit hit — please wait a moment and try again.")
+            except openai.APITimeoutError:
+                st.error("❌ Request timed out — the API took too long to respond. Please try again.")
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"❌ Enhancement failed: {e}")
             finally:
                 st.session_state.is_enhancing = False
 
@@ -838,8 +873,12 @@ if st.session_state.enhanced_resume:
         st.download_button("⬇ Download .txt", data=edited,
                            file_name=f"enhanced_resume_{_dl_ts}.txt", mime="text/plain", use_container_width=True)
     with col2:
-        st.download_button("⬇ Download .pdf", data=generate_pdf(edited),
-                           file_name=f"enhanced_resume_{_dl_ts}.pdf", mime="application/pdf", use_container_width=True)
+        try:
+            pdf_data = generate_pdf(edited)
+            st.download_button("⬇ Download .pdf", data=pdf_data,
+                               file_name=f"enhanced_resume_{_dl_ts}.pdf", mime="application/pdf", use_container_width=True)
+        except Exception as e:
+            st.error(f"❌ PDF export failed: {e}. Try downloading as .txt instead.")
     with col3:
         if st.button("↺ Reset edits", use_container_width=True):
             active = versions[st.session_state.active_version_idx]["content"] if versions else st.session_state.enhanced_resume
@@ -923,7 +962,7 @@ if st.session_state.enhanced_resume:
     st.divider()
 
     if not st.session_state.ats_result:
-        # Show button only when no result exists yet
+        # No result yet — show run button only
         col_ats_btn, col_ats_info = st.columns([1, 5])
         with col_ats_btn:
             run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
@@ -942,7 +981,7 @@ if st.session_state.enhanced_resume:
             else:
                 with st.spinner("Scoring enhanced resume…"):
                     try:
-                        ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                        ar = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=30.0).chat.completions.create(
                             model="gpt-4o-mini", temperature=0.0, max_tokens=600,
                             messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
                                       {"role":"user","content":(
@@ -953,10 +992,13 @@ if st.session_state.enhanced_resume:
                         st.session_state.ats_result = result
                         st.session_state.ats_score_cache[cache_key] = result
                         st.rerun()
+                    except openai.APITimeoutError:
+                        st.error("❌ ATS scoring timed out — please try again.")
                     except Exception as e:
-                        st.error(f"ATS scoring failed: {e}")
+                        st.error(f"❌ ATS scoring failed: {e}")
+
     else:
-        # Show re-run button above results
+        # Result exists — show re-run button + results, never alongside initial button
         col_ats_btn, col_ats_info = st.columns([1, 5])
         with col_ats_btn:
             rerun_ats = st.button("🔄 Re-run ATS Score", use_container_width=True,
@@ -968,7 +1010,6 @@ if st.session_state.enhanced_resume:
             st.session_state.ats_score_cache = {}
             st.rerun()
 
-    if st.session_state.ats_result:
         es = parse_ats(st.session_state.ats_result)
         bs = parse_ats(st.session_state.baseline_ats_result) if st.session_state.baseline_ats_result else None
         if es["total"] is not None:
@@ -1059,7 +1100,7 @@ if st.session_state.enhanced_resume:
                     f"If a skill is requested, add it to the Skills section. "
                     f"Output only the complete revised resume with all changes integrated."
                 )
-                rev_resp = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                rev_resp = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=60.0).chat.completions.create(
                     model=model, temperature=0.5, max_tokens=3500,
                     messages=[
                         {"role": "system", "content": REVISION_PROMPT},
@@ -1091,18 +1132,22 @@ if st.session_state.enhanced_resume:
 
                 try:
                     gap_content = f"## Resume\n\n{revised}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
-                    gr = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                    gr = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=30.0).chat.completions.create(
                         model="gpt-4o-mini", temperature=0.0, max_tokens=800,
                         messages=[{"role":"system","content":SKILLS_GAP_PROMPT},
                                   {"role":"user","content":gap_content}])
                     st.session_state.skills_gap = gr.choices[0].message.content.strip()
-                except Exception:
-                    pass
+                except Exception as e:
+                    st.caption(f"⚠️ Skills gap update failed after revision: {e}")
 
-                st.success("✅ Revision applied — skills gap updated. Run ATS Score to re-evaluate.")
                 st.rerun()
+            except openai.APITimeoutError:
+                st.error("❌ Revision timed out — the API took too long. Please try again.")
             except Exception as e:
-                st.error(f"Revision failed: {e}")
+                st.error(f"❌ Revision failed: {e}")
+
+    if st.session_state.revision_history:
+        st.caption(f"✅ Revision applied — {len(st.session_state.revision_history)} revision(s) made.")
 
 # ── Application Tracker ────────────────────────────────────────────────────────
 st.divider(); st.subheader("📋 Application Tracker")
