@@ -313,9 +313,14 @@ EXECUTIVE SUMMARY / PROFESSIONAL PROFILE:
 
 WORK EXPERIENCE BULLETS:
 - Bullets already strong and JD-relevant — keep with light polish only.
-- Vague, passive, or JD-misaligned bullets — rewrite using: [Strong verb] + [what you did] + [how/with what] + [result or impact].
+- Vague, passive, or JD-misaligned bullets — rewrite using the CAR formula:
+  * C — Context: briefly state the situation, project, or scope
+  * A — Action: what YOU specifically did, opening with a strong verb
+  * R — Result: the outcome, impact, or value delivered
+  * Example: "Assisted in maintenance" → "Supported preventive maintenance of CNC machines (C), performing scheduled inspections and fault diagnosis (A), contributing to reduced unplanned downtime on the production line (R)"
+  * Not every bullet needs all three parts stated explicitly — but every bullet must have a clear Action and at least imply a Result.
 - Use the JD's exact terminology where applicable (e.g. "root cause analysis" not "finding problems", "preventive maintenance" not "machine upkeep").
-- Add a reasonable result where none exists and context supports it — do not fabricate numbers not supported by the original.
+- Add a reasonable implied result where context supports it — do not fabricate specific numbers not in the original.
 - Strong verbs: Executed, Implemented, Collaborated, Optimised, Reduced, Troubleshot, Calibrated, Validated, Coordinated, Monitored, Analysed, Resolved, Streamlined, Facilitated, Engineered, Delivered, Spearheaded.
 
 PROJECTS:
@@ -916,39 +921,52 @@ st.markdown('<div class="warn-box">⚠️ <strong>Always review the enhanced res
 # ── ATS Score button + display ─────────────────────────────────────────────────
 if st.session_state.enhanced_resume:
     st.divider()
-    col_ats_btn, col_ats_info = st.columns([1, 5])
-    with col_ats_btn:
-        run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
-                            help="Score the current enhanced resume against the JD.")
-    with col_ats_info:
-        if st.session_state.ats_result:
-            st.caption("ATS score shown below. Click again after revisions to re-evaluate.")
-        else:
+
+    if not st.session_state.ats_result:
+        # Show button only when no result exists yet
+        col_ats_btn, col_ats_info = st.columns([1, 5])
+        with col_ats_btn:
+            run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
+                                help="Score the current enhanced resume against the JD.")
+        with col_ats_info:
             st.caption("Click to score your enhanced resume — including after revisions.")
 
-    if run_ats:
-        # Always read from session state directly — not from widget which may be stale
-        current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
-        cache_key = hashlib.md5(
-            (current_resume + st.session_state.jd_text + str(st.session_state.revision_version)).encode()
-        ).hexdigest()
-        if cache_key in st.session_state.ats_score_cache:
-            st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
-        else:
-            with st.spinner("Scoring enhanced resume…"):
-                try:
-                    ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-                        model="gpt-4o-mini", temperature=0.0, max_tokens=600,
-                        messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
-                                  {"role":"user","content":(
-                                      f"## Enhanced Resume\n\n{current_resume}"
-                                      f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
-                                  )}])
-                    result = ar.choices[0].message.content.strip()
-                    st.session_state.ats_result = result
-                    st.session_state.ats_score_cache[cache_key] = result
-                except Exception as e:
-                    st.error(f"ATS scoring failed: {e}")
+        if run_ats:
+            current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
+            cache_key = hashlib.md5(
+                (current_resume + st.session_state.jd_text + str(st.session_state.revision_version)).encode()
+            ).hexdigest()
+            if cache_key in st.session_state.ats_score_cache:
+                st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
+                st.rerun()
+            else:
+                with st.spinner("Scoring enhanced resume…"):
+                    try:
+                        ar = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+                            model="gpt-4o-mini", temperature=0.0, max_tokens=600,
+                            messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
+                                      {"role":"user","content":(
+                                          f"## Enhanced Resume\n\n{current_resume}"
+                                          f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
+                                      )}])
+                        result = ar.choices[0].message.content.strip()
+                        st.session_state.ats_result = result
+                        st.session_state.ats_score_cache[cache_key] = result
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"ATS scoring failed: {e}")
+    else:
+        # Show re-run button above results
+        col_ats_btn, col_ats_info = st.columns([1, 5])
+        with col_ats_btn:
+            rerun_ats = st.button("🔄 Re-run ATS Score", use_container_width=True,
+                                  help="Re-score after revisions.")
+        with col_ats_info:
+            st.caption("ATS score shown below. Re-run after revisions to re-evaluate.")
+        if rerun_ats:
+            st.session_state.ats_result = None
+            st.session_state.ats_score_cache = {}
+            st.rerun()
 
     if st.session_state.ats_result:
         es = parse_ats(st.session_state.ats_result)
