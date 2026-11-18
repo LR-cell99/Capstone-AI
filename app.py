@@ -74,7 +74,7 @@ def available_providers() -> list[str]:
 def get_client(name: str) -> openai.OpenAI:
     p = PROVIDERS[name]
     return openai.OpenAI(api_key=provider_key(name), base_url=p["base_url"] or None,
-                         timeout=p["timeout"], max_retries=2)
+                         timeout=p["timeout"], max_retries=1)
 
 _SKIP_MODEL_WORDS = ("embed", "whisper", "tts", "audio", "transcri", "image", "dall-e",
                      "moderation", "guard", "realtime", "aqa", "imagen", "veo", "live", "computer-use",
@@ -90,6 +90,35 @@ _PREFERRED_FAST = {
                       "gemini-flash-latest"],
     "Groq": ["llama-3.1-8b-instant"],
 }
+
+# Tried in order when the chosen model is overloaded or out of free quota (only ones the provider offers).
+# Override per provider in .env / Secrets, e.g. GEMINI_FALLBACK_MODELS=gemini-3.6-flash,gemini-3.5-flash
+_FALLBACK_MODELS = {
+    "Google Gemini": ["gemini-flash-latest", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+                      "gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash",
+                      "gemini-2.5-flash-lite"],
+    "Groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+}
+_FALLBACK_FAST = {
+    "Google Gemini": ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite",
+                      "gemini-flash-latest", "gemini-3.6-flash", "gemini-3.5-flash"],
+    "Groq": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
+}
+
+def fallback_chain(provider: str, first: str, fast: bool) -> list[str]:
+    p = PROVIDERS[provider]
+    env = os.getenv(f"{p['env_prefix']}_FALLBACK_MODELS", "")
+    extra = [m.strip() for m in env.split(",") if m.strip()] or \
+            (_FALLBACK_FAST if fast else _FALLBACK_MODELS).get(provider, [])
+    offered = set(list_models(provider))
+    return list(dict.fromkeys([first] + [m for m in extra if m in offered]))
+
+def _is_overloaded(e: Exception) -> bool:
+    """Temporary capacity / quota problems where another model may still work."""
+    if isinstance(e, (openai.RateLimitError, openai.InternalServerError, openai.APITimeoutError)):
+        return True
+    msg = (_err_detail(e) + " " + str(e)).lower()
+    return any(w in msg for w in ("high demand", "overloaded", "unavailable", "resource_exhausted", "quota", "try again later"))
 
 def pick_default(name: str, models: list[str], env_var: str, preferred: dict, fallback: str | None = None) -> str:
     """Default model: .env setting, else first preferred model the provider offers, else first in list."""
@@ -145,13 +174,8 @@ def _err_detail(e: Exception) -> str:
             return msg
     return getattr(e, "message", "") or str(e)
 
-def llm(messages: list, *, fast: bool = False, temperature: float = 0.0, max_tokens: int = 1000) -> str:
-    """Single entry point for every AI call. fast=True uses the scoring/extraction model."""
-    if not llm_ready():
-        raise RuntimeError("No AI provider/model selected — check the sidebar.")
-    client = get_client(LLM_CFG["provider"])
-    kwargs = dict(model=LLM_CFG["fast_model"] if fast else LLM_CFG["model"],
-                  messages=messages, temperature=temperature, max_tokens=max_tokens)
+def _llm_once(client, model: str, messages: list, temperature: float, max_tokens: int) -> str:
+    kwargs = dict(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
     try:
         r = client.chat.completions.create(**kwargs)
     except openai.BadRequestError as e:
@@ -173,8 +197,29 @@ def llm(messages: list, *, fast: bool = False, temperature: float = 0.0, max_tok
             raise
     text = _strip_think(r.choices[0].message.content or "")
     if not text:
-        raise RuntimeError(f"{kwargs['model']} returned an empty reply — try another model in the sidebar.")
+        raise RuntimeError(f"{model} returned an empty reply — try another model in the sidebar.")
     return text
+
+def llm(messages: list, *, fast: bool = False, temperature: float = 0.0, max_tokens: int = 1000) -> str:
+    """Single entry point for every AI call. fast=True uses the scoring/extraction model.
+    If the model is overloaded or out of free quota, the next model in the fallback chain is tried."""
+    if not llm_ready():
+        raise RuntimeError("No AI provider/model selected — check the sidebar.")
+    provider = LLM_CFG["provider"]
+    client = get_client(provider)
+    chosen = LLM_CFG["fast_model"] if fast else LLM_CFG["model"]
+    last_err = None
+    for model in fallback_chain(provider, chosen, fast):
+        try:
+            text = _llm_once(client, model, messages, temperature, max_tokens)
+            if model != chosen:
+                st.session_state._fallback_note = f"{chosen} was busy, so {model} was used instead."
+            return text
+        except Exception as e:
+            if not _is_overloaded(e):
+                raise
+            last_err = e                     # busy / out of quota — try the next model
+    raise last_err
 
 def ai_error(e: Exception) -> str:
     """Readable reason for a failed AI call, including the provider's own message."""
@@ -185,8 +230,8 @@ def ai_error(e: Exception) -> str:
         hint = " — this model may not support this kind of request; pick another model in the sidebar."
     elif isinstance(e, openai.NotFoundError):
         hint = " — model not found; pick another model in the sidebar."
-    elif isinstance(e, openai.RateLimitError):
-        hint = " — free-tier limit reached; wait a minute or switch model."
+    elif _is_overloaded(e):
+        hint = " — all fallback models were busy or out of free quota; wait a minute and try again."
     return f"{detail}{model}{hint}"
 
 # ── Application tracker storage (no database) ─────────────────────────────────
@@ -1178,6 +1223,8 @@ if enhance_clicked:
                 st.session_state.is_enhancing = False
 
 # ── Output ─────────────────────────────────────────────────────────────────────
+if st.session_state.get("_fallback_note"):
+    st.info("ℹ️ " + st.session_state.pop("_fallback_note"))
 st.divider()
 st.subheader("Enhanced Resume Output")
 
