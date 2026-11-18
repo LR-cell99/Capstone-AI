@@ -54,7 +54,8 @@ PROVIDERS = {
     "Google Gemini": dict(
         env_prefix="GEMINI", key_env="GEMINI_API_KEY",
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/", list_models=True,
-        models=[], fast=None, timeout=60.0),
+        models=["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-3.7-flash", "gemini-3.5-flash-lite"],
+        fast="gemini-flash-lite-latest", timeout=90.0),
 }
 
 # Filled in by the sidebar on every run: {"provider", "model", "fast_model"}
@@ -76,7 +77,28 @@ def get_client(name: str) -> openai.OpenAI:
                          timeout=p["timeout"], max_retries=2)
 
 _SKIP_MODEL_WORDS = ("embed", "whisper", "tts", "audio", "transcri", "image", "dall-e",
-                     "moderation", "guard", "realtime", "aqa", "imagen", "veo")
+                     "moderation", "guard", "realtime", "aqa", "imagen", "veo", "live", "computer-use",
+                     "robotics", "learnlm", "nano-banana", "lyria", "omni", "translat", "thinking-exp")
+
+# Models tried first as the default for each provider (first one that the provider offers wins)
+_PREFERRED_MODELS = {
+    "Google Gemini": ["gemini-flash-latest", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"],
+    "Groq": ["llama-3.3-70b-versatile"],
+}
+_PREFERRED_FAST = {
+    "Google Gemini": ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite",
+                      "gemini-flash-latest"],
+    "Groq": ["llama-3.1-8b-instant"],
+}
+
+def pick_default(name: str, models: list[str], env_var: str, preferred: dict, fallback: str | None = None) -> str:
+    """Default model: .env setting, else first preferred model the provider offers, else first in list."""
+    for m in [os.getenv(env_var, "").strip()] + preferred.get(name, []):
+        if m and m in models:
+            return m
+    if fallback is not None:
+        return fallback
+    return models[0] if models else ""
 
 @st.cache_data(ttl=600, show_spinner=False)
 def list_models(name: str) -> list[str]:
@@ -93,10 +115,15 @@ def list_models(name: str) -> list[str]:
     except Exception:
         return p["models"]
     ids = [i.removeprefix("models/") for i in ids if not any(w in i.lower() for w in _SKIP_MODEL_WORDS)]
+    if name == "Google Gemini":
+        # Only regular Gemini text models — the list also has agents (e.g. "antigravity-…"), Gemma, etc.
+        ids = [i for i in ids if i.startswith("gemini-")]
     if name == "OpenRouter":
         ids.sort(key=lambda i: (not i.endswith(":free"), i))   # free models first
     else:
         ids.sort()
+    top = [m for m in _PREFERRED_MODELS.get(name, []) + _PREFERRED_FAST.get(name, []) if m in ids]
+    ids = list(dict.fromkeys(top + ids))                       # recommended models first
     return ids or p["models"]
 
 def llm_ready() -> bool:
@@ -105,6 +132,18 @@ def llm_ready() -> bool:
 def _strip_think(text: str) -> str:
     # Reasoning models (deepseek-r1, qwen3, …) can put their thinking in the reply
     return re.sub(r"(?is)<think>.*?</think>", "", text).strip()
+
+def _err_detail(e: Exception) -> str:
+    """The provider's own error message (the SDK's str(e) often only says 'Error code: 400')."""
+    body = getattr(e, "body", None)
+    if isinstance(body, list) and body:
+        body = body[0]
+    if isinstance(body, dict):
+        err = body.get("error", body)
+        msg = err.get("message", "") if isinstance(err, dict) else str(err)
+        if msg:
+            return msg
+    return getattr(e, "message", "") or str(e)
 
 def llm(messages: list, *, fast: bool = False, temperature: float = 0.0, max_tokens: int = 1000) -> str:
     """Single entry point for every AI call. fast=True uses the scoring/extraction model."""
@@ -116,15 +155,39 @@ def llm(messages: list, *, fast: bool = False, temperature: float = 0.0, max_tok
     try:
         r = client.chat.completions.create(**kwargs)
     except openai.BadRequestError as e:
-        # Some newer OpenAI models reject max_tokens / custom temperature — retry without them
-        msg = str(e).lower()
+        msg = (_err_detail(e) + " " + str(e)).lower()
         if "max_tokens" in msg or "temperature" in msg:
+            # Some newer OpenAI models reject max_tokens / custom temperature — retry without them
             kwargs.pop("temperature", None)
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
             r = client.chat.completions.create(**kwargs)
+        elif "system" in msg or "developer instruction" in msg:
+            # Some models don't accept a system message — fold it into the user message
+            sys_txt = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+            rest = [dict(m) for m in messages if m["role"] != "system"]
+            if rest and sys_txt:
+                rest[0]["content"] = f"{sys_txt}\n\n---\n\n{rest[0]['content']}"
+            kwargs["messages"] = rest
+            r = client.chat.completions.create(**kwargs)
         else:
             raise
-    return _strip_think(r.choices[0].message.content or "")
+    text = _strip_think(r.choices[0].message.content or "")
+    if not text:
+        raise RuntimeError(f"{kwargs['model']} returned an empty reply — try another model in the sidebar.")
+    return text
+
+def ai_error(e: Exception) -> str:
+    """Readable reason for a failed AI call, including the provider's own message."""
+    detail = _err_detail(e)
+    model = f" (model: {LLM_CFG['model']} / {LLM_CFG['fast_model']})" if LLM_CFG else ""
+    hint = ""
+    if isinstance(e, openai.BadRequestError):
+        hint = " — this model may not support this kind of request; pick another model in the sidebar."
+    elif isinstance(e, openai.NotFoundError):
+        hint = " — model not found; pick another model in the sidebar."
+    elif isinstance(e, openai.RateLimitError):
+        hint = " — free-tier limit reached; wait a minute or switch model."
+    return f"{detail}{model}{hint}"
 
 # ── Application tracker storage (no database) ─────────────────────────────────
 def empty_tracker() -> pd.DataFrame:
@@ -815,7 +878,7 @@ with st.sidebar:
             _models = list_models(provider)
 
         _CUSTOM = "✏️ Custom model name…"
-        _default_m = os.getenv(f"{_p['env_prefix']}_DEFAULT_MODEL", "")
+        _default_m = pick_default(provider, _models, f"{_p['env_prefix']}_DEFAULT_MODEL", _PREFERRED_MODELS)
         _opts = _models + [_CUSTOM]
         _choice = st.selectbox("Model (writing & revisions)", _opts,
                                index=_opts.index(_default_m) if _default_m in _opts else 0,
@@ -826,7 +889,8 @@ with st.sidebar:
         else:
             model = _choice
 
-        _fast_default = os.getenv(f"{_p['env_prefix']}_FAST_MODEL") or _p.get("fast") or model
+        _fast_default = pick_default(provider, _models, f"{_p['env_prefix']}_FAST_MODEL", _PREFERRED_FAST,
+                                     fallback=_p.get("fast") or model)
         _fast_opts = list(dict.fromkeys(([model] if model else []) + _models))
         fast_model = st.selectbox("Model (scoring & JD extraction)", _fast_opts,
                                   index=_fast_opts.index(_fast_default) if _fast_default in _fast_opts else 0,
@@ -945,7 +1009,7 @@ with col_jd:
                     st.warning("⚠️ JD extraction timed out — using raw extracted text. Try again if the JD looks unclean.")
                 except Exception as e:
                     ai_jd = pre
-                    st.warning(f"⚠️ AI JD extraction failed — using raw extracted text. Reason: {e}")
+                    st.warning(f"⚠️ AI JD extraction failed — using raw extracted text. Reason: {ai_error(e)}")
             else:
                 ai_jd = pre
                 st.caption("No AI model selected — using raw extracted text.")
@@ -991,7 +1055,7 @@ with col_jd:
 st.write("")
 col_btn, col_clear = st.columns([1, 5])
 with col_btn:
-    enhance_clicked = st.button("⚡ Enhance Resume", use_container_width=True)
+    enhance_clicked = st.button("⚡ Enhance Resume", width="stretch")
 with col_clear:
     if st.button("Clear all"):
         for k, v in _SS_DEFAULTS.items():
@@ -1018,7 +1082,7 @@ if enhance_clicked:
                 st.session_state.baseline_ats_model = f"{LLM_CFG['provider']} / {LLM_CFG['fast_model']}"
             except Exception as e:
                 st.session_state.baseline_ats_result = None
-                st.warning(f"⚠️ Baseline ATS scoring failed: {e}")
+                st.warning(f"⚠️ Baseline ATS scoring failed: {ai_error(e)}")
 
         with st.spinner(f"Step 2/3 — Enhancing your resume with {LLM_CFG['model']}…"):
             try:
@@ -1097,21 +1161,19 @@ if enhance_clicked:
                         fast=True, temperature=0.0, max_tokens=800)
                 except Exception as e:
                     st.session_state.skills_gap = None
-                    st.warning(f"⚠️ Skills gap analysis failed: {e}")
+                    st.warning(f"⚠️ Skills gap analysis failed: {ai_error(e)}")
 
             except openai.AuthenticationError:
                 st.error(f"❌ Invalid API key for {LLM_CFG['provider']} — check your .env file.")
-            except openai.RateLimitError:
-                st.error("❌ Rate limit hit — free tiers have low limits. Wait a moment, or switch provider/model.")
-            except openai.NotFoundError:
-                st.error(f"❌ Model `{LLM_CFG['model']}` not found on {LLM_CFG['provider']}. Pick another model.")
+            except (openai.RateLimitError, openai.NotFoundError, openai.BadRequestError) as e:
+                st.error(f"❌ Enhancement failed: {ai_error(e)}")
             except openai.APITimeoutError:
                 st.error("❌ Request timed out — the model took too long to respond. Try again or use a smaller model.")
             except openai.APIConnectionError:
                 st.error(f"❌ Could not reach {LLM_CFG['provider']}. If using Ollama, check it is running "
                          "(`ollama serve`) and that OLLAMA_BASE_URL is correct.")
             except Exception as e:
-                st.error(f"❌ Enhancement failed: {e}")
+                st.error(f"❌ Enhancement failed: {ai_error(e)}")
             finally:
                 st.session_state.is_enhancing = False
 
@@ -1159,16 +1221,16 @@ if st.session_state.enhanced_resume:
     col1, col2, col3, _ = st.columns([1, 1, 1, 3])
     with col1:
         st.download_button("⬇ Download .txt", data=edited,
-                           file_name=f"enhanced_resume_{_dl_ts}.txt", mime="text/plain", use_container_width=True)
+                           file_name=f"enhanced_resume_{_dl_ts}.txt", mime="text/plain", width="stretch")
     with col2:
         try:
             pdf_data = generate_pdf(edited)
             st.download_button("⬇ Download .pdf", data=pdf_data,
-                               file_name=f"enhanced_resume_{_dl_ts}.pdf", mime="application/pdf", use_container_width=True)
+                               file_name=f"enhanced_resume_{_dl_ts}.pdf", mime="application/pdf", width="stretch")
         except Exception as e:
             st.error(f"❌ PDF export failed: {e}. Try downloading as .txt instead.")
     with col3:
-        if st.button("↺ Reset edits", use_container_width=True):
+        if st.button("↺ Reset edits", width="stretch"):
             active = versions[st.session_state.active_version_idx]["content"] if versions else st.session_state.enhanced_resume
             st.session_state.edited_resume = active
 else:
@@ -1253,7 +1315,7 @@ if st.session_state.enhanced_resume:
         # No result yet — show run button only
         col_ats_btn, col_ats_info = st.columns([1, 5])
         with col_ats_btn:
-            run_ats = st.button("🎯 Run ATS Score", use_container_width=True,
+            run_ats = st.button("🎯 Run ATS Score", width="stretch",
                                 help="Score the current enhanced resume against the JD.")
         with col_ats_info:
             st.caption("Click to score your enhanced resume — including after revisions.")
@@ -1286,13 +1348,13 @@ if st.session_state.enhanced_resume:
                     except openai.APITimeoutError:
                         st.error("❌ ATS scoring timed out — please try again.")
                     except Exception as e:
-                        st.error(f"❌ ATS scoring failed: {e}")
+                        st.error(f"❌ ATS scoring failed: {ai_error(e)}")
 
     else:
         # Result exists — show re-run button + results, never alongside initial button
         col_ats_btn, col_ats_info = st.columns([1, 5])
         with col_ats_btn:
-            rerun_ats = st.button("🔄 Re-run ATS Score", use_container_width=True,
+            rerun_ats = st.button("🔄 Re-run ATS Score", width="stretch",
                                   help="Re-score after revisions.")
         with col_ats_info:
             st.caption("ATS score shown below. Re-run after revisions to re-evaluate.")
@@ -1381,10 +1443,10 @@ if st.session_state.enhanced_resume:
 
     col_rev, col_reset_rev, _ = st.columns([1, 1, 4])
     with col_rev:
-        apply_revision = st.button("✏️ Apply Revision", use_container_width=True,
+        apply_revision = st.button("✏️ Apply Revision", width="stretch",
                                    disabled=not revision_input.strip() or not llm_ready())
     with col_reset_rev:
-        if st.button("↺ Clear History", use_container_width=True):
+        if st.button("↺ Clear History", width="stretch"):
             st.session_state.revision_history = []
             st.session_state.edited_resume = st.session_state.enhanced_resume
 
@@ -1433,7 +1495,7 @@ if st.session_state.enhanced_resume:
                         [{"role":"system","content":SKILLS_GAP_PROMPT},{"role":"user","content":gap_content}],
                         fast=True, temperature=0.0, max_tokens=800)
                 except Exception as e:
-                    st.caption(f"⚠️ Skills gap update failed after revision: {e}")
+                    st.caption(f"⚠️ Skills gap update failed after revision: {ai_error(e)}")
 
                 st.rerun()
             except openai.APITimeoutError:
@@ -1441,7 +1503,7 @@ if st.session_state.enhanced_resume:
             except openai.APIConnectionError:
                 st.error(f"❌ Could not reach {LLM_CFG['provider']} — check it is running / reachable.")
             except Exception as e:
-                st.error(f"❌ Revision failed: {e}")
+                st.error(f"❌ Revision failed: {ai_error(e)}")
 
     if st.session_state.revision_history:
         st.caption(f"✅ Revision applied — {len(st.session_state.revision_history)} revision(s) made.")
@@ -1473,7 +1535,7 @@ with st.expander("📂 Import previous applications (Excel or CSV)"):
 # (new enhancement, import, clear) refresh it without re-applying old edits.
 edited_t = st.data_editor(
     normalise_tracker(st.session_state.tracker_edit),
-    num_rows="dynamic", use_container_width=True, hide_index=False,
+    num_rows="dynamic", width="stretch", hide_index=False,
     column_config={
         "Company": st.column_config.TextColumn("Company"),
         "Role": st.column_config.TextColumn("Role"),
@@ -1497,9 +1559,9 @@ with c_dl:
     st.download_button("⬇ Export Excel", data=export_excel(current),
                        file_name=f"applications_{datetime.now().strftime('%Y-%m-%d_%H%M')}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True, disabled=current.empty)
+                       width="stretch", disabled=current.empty)
 with c_clear:
-    if st.button("🗑️ Clear tracker", use_container_width=True, disabled=current.empty):
+    if st.button("🗑️ Clear tracker", width="stretch", disabled=current.empty):
         st.session_state._confirm_clear_tracker = True
 st.caption("Tip: the Excel file also opens in Google Sheets — upload it to Google Drive and open it there.")
 
@@ -1520,8 +1582,8 @@ with st.expander("🟢 Google Sheets — save / load your tracker"):
         gurl = st.text_input("Google Sheet link", key="gsheet_url",
                              placeholder="https://docs.google.com/spreadsheets/d/…").strip()
         g1, g2, _ = st.columns([1, 1, 4])
-        save_gs = g1.button("⬆ Save to Sheet", use_container_width=True, disabled=not gurl)
-        load_gs = g2.button("⬇ Load from Sheet", use_container_width=True, disabled=not gurl)
+        save_gs = g1.button("⬆ Save to Sheet", width="stretch", disabled=not gurl)
+        load_gs = g2.button("⬇ Load from Sheet", width="stretch", disabled=not gurl)
         if save_gs:
             with st.spinner("Saving to Google Sheets…"):
                 try:
@@ -1550,8 +1612,8 @@ if st.session_state.get("_confirm_clear_tracker"):
     st.warning("Remove all rows from the tracker" + (f" and the saved history file `{TRACKER_FILE}`" if TRACKER_AUTOSAVE else "")
                + "? Export the Excel first if you want to keep them.")
     y, n, _ = st.columns([1, 1, 4])
-    if y.button("Yes, clear", use_container_width=True):
+    if y.button("Yes, clear", width="stretch"):
         st.session_state._confirm_clear_tracker = False
         set_tracker(empty_tracker()); st.rerun()
-    if n.button("Cancel", use_container_width=True):
+    if n.button("Cancel", width="stretch"):
         st.session_state._confirm_clear_tracker = False; st.rerun()
