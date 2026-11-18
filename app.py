@@ -1,5 +1,5 @@
 import streamlit as st
-import openai, os, re, io, hashlib, hashlib
+import openai, os, re, io, json, hashlib
 from datetime import date, datetime
 from pathlib import Path
 import pandas as pd
@@ -9,68 +9,288 @@ import pdfplumber, openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from docx import Document
-from supabase import create_client, Client as SupabaseClient
+try:
+    import gspread
+    from gspread.utils import ValueInputOption
+except ImportError:          # Google Sheets is optional
+    gspread = None
 
 load_dotenv()
-OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY")
-SUPABASE_URL      = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 BASE_RESUME_DIR   = Path("base_resume")
 SUPPORTED_EXTS    = (".pdf", ".docx", ".txt")
 STATUS_OPTIONS    = ["Not Applied", "Pending", "Applied", "Interview", "Offer", "Rejected"]
+# Only auto-load base_resume/ when you explicitly turn it on (keep it off on a shared/hosted app)
+AUTO_LOAD_BASE_RESUME = os.getenv("AUTO_LOAD_BASE_RESUME", "false").lower() == "true"
+# Keep a running history of applications in a local file across sessions.
+# Turn on only for your own copy — on a shared app every user would see the same file.
+TRACKER_AUTOSAVE  = os.getenv("TRACKER_AUTOSAVE", "false").lower() == "true"
+TRACKER_FILE      = Path(os.getenv("TRACKER_FILE", "applications/applications_history.csv"))
+TRACKER_COLS      = ["Company", "Role", "Date Applied", "Status"]
+# Google Sheets (optional) — uses a Google service account; see .env.example
+GOOGLE_SA_FILE    = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+GOOGLE_SA_JSON    = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+GOOGLE_SHEET_URL  = os.getenv("GOOGLE_SHEET_URL", "").strip()   # your own sheet; pre-filled in the app
 
-# ── Supabase ───────────────────────────────────────────────────────────────────
+# ── AI providers ───────────────────────────────────────────────────────────────
+# Every provider below speaks the OpenAI-compatible API, so one client handles all of them.
+# A provider only appears in the app if its key (or, for Ollama, its URL) is in .env.
+_ollama_url = os.getenv("OLLAMA_BASE_URL", "").strip().rstrip("/")
+if _ollama_url and not _ollama_url.endswith("/v1"):
+    _ollama_url += "/v1"
+
+PROVIDERS = {
+    "OpenAI": dict(
+        env_prefix="OPENAI", key_env="OPENAI_API_KEY", base_url=None, list_models=False,
+        models=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"], fast="gpt-4o-mini", timeout=60.0),
+    "Ollama (local)": dict(
+        env_prefix="OLLAMA", key_env=None, base_url=_ollama_url, list_models=True,
+        models=[], fast=None, timeout=300.0),
+    "Groq": dict(
+        env_prefix="GROQ", key_env="GROQ_API_KEY", base_url="https://api.groq.com/openai/v1", list_models=True,
+        models=[], fast=None, timeout=60.0),
+    "OpenRouter": dict(
+        env_prefix="OPENROUTER", key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai/api/v1", list_models=True,
+        models=[], fast=None, timeout=90.0),
+    "Google Gemini": dict(
+        env_prefix="GEMINI", key_env="GEMINI_API_KEY",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/", list_models=True,
+        models=[], fast=None, timeout=60.0),
+}
+
+# Filled in by the sidebar on every run: {"provider", "model", "fast_model"}
+LLM_CFG: dict | None = None
+
+def provider_key(name: str) -> str:
+    p = PROVIDERS[name]
+    if p["key_env"] is None:               # Ollama needs no key, just a URL
+        return "ollama" if p["base_url"] else ""
+    return os.getenv(p["key_env"], "").strip()
+
+def available_providers() -> list[str]:
+    return [n for n in PROVIDERS if provider_key(n)]
+
 @st.cache_resource
-def get_supabase() -> SupabaseClient | None:
-    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-        return None
-    try:
-        return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    except Exception as e:
-        st.error(f"Supabase connection error: {e}")
-        return None
+def get_client(name: str) -> openai.OpenAI:
+    p = PROVIDERS[name]
+    return openai.OpenAI(api_key=provider_key(name), base_url=p["base_url"] or None,
+                         timeout=p["timeout"], max_retries=2)
 
-def sb_load() -> pd.DataFrame:
-    sb = get_supabase()
-    empty = pd.DataFrame(columns=["Company", "Role", "Date Applied", "Status", "id"])
-    if not sb:
-        return empty
-    try:
-        rows = sb.table("applications").select("*").order("created_at").execute().data or []
-        if not rows:
-            return empty
-        df = pd.DataFrame(rows).rename(columns={
-            "company": "Company", "role": "Role",
-            "date_applied": "Date Applied", "status": "Status"})
-        return df[[c for c in ["Company", "Role", "Date Applied", "Status", "id"] if c in df.columns]]
-    except Exception as e:
-        st.warning(f"⚠️ Could not load tracker from Supabase: {e}")
-        return empty
+_SKIP_MODEL_WORDS = ("embed", "whisper", "tts", "audio", "transcri", "image", "dall-e",
+                     "moderation", "guard", "realtime", "aqa", "imagen", "veo")
 
-def sb_insert(company, role, date_applied, status) -> tuple[str | None, str | None]:
-    sb = get_supabase()
-    if not sb:
-        return None, "Supabase not initialised — check .env"
+@st.cache_data(ttl=600, show_spinner=False)
+def list_models(name: str) -> list[str]:
+    """Models offered for a provider. <PREFIX>_MODELS in .env (comma-separated) overrides the
+    live list — use it to limit what other users can pick."""
+    p = PROVIDERS[name]
+    pinned = [m.strip() for m in os.getenv(f"{p['env_prefix']}_MODELS", "").split(",") if m.strip()]
+    if pinned:
+        return pinned
+    if not p["list_models"]:
+        return p["models"]
     try:
-        d = date_applied.strftime("%Y-%m-%d") if hasattr(date_applied, "strftime") else str(date_applied)[:10]
-        res = sb.table("applications").insert(
-            {"company": str(company), "role": str(role), "date_applied": d, "status": str(status)}
-        ).execute()
-        return (res.data[0]["id"], None) if res.data else (None, "Insert returned no data")
-    except Exception as e:
-        return None, str(e)
+        ids = [m.id for m in get_client(name).models.list().data]
+    except Exception:
+        return p["models"]
+    ids = [i.removeprefix("models/") for i in ids if not any(w in i.lower() for w in _SKIP_MODEL_WORDS)]
+    if name == "OpenRouter":
+        ids.sort(key=lambda i: (not i.endswith(":free"), i))   # free models first
+    else:
+        ids.sort()
+    return ids or p["models"]
 
-def sb_update(row_id, company, role, date_applied, status):
-    sb = get_supabase()
-    if not sb or not row_id:
+def llm_ready() -> bool:
+    return bool(LLM_CFG and LLM_CFG.get("model"))
+
+def _strip_think(text: str) -> str:
+    # Reasoning models (deepseek-r1, qwen3, …) can put their thinking in the reply
+    return re.sub(r"(?is)<think>.*?</think>", "", text).strip()
+
+def llm(messages: list, *, fast: bool = False, temperature: float = 0.0, max_tokens: int = 1000) -> str:
+    """Single entry point for every AI call. fast=True uses the scoring/extraction model."""
+    if not llm_ready():
+        raise RuntimeError("No AI provider/model selected — check the sidebar.")
+    client = get_client(LLM_CFG["provider"])
+    kwargs = dict(model=LLM_CFG["fast_model"] if fast else LLM_CFG["model"],
+                  messages=messages, temperature=temperature, max_tokens=max_tokens)
+    try:
+        r = client.chat.completions.create(**kwargs)
+    except openai.BadRequestError as e:
+        # Some newer OpenAI models reject max_tokens / custom temperature — retry without them
+        msg = str(e).lower()
+        if "max_tokens" in msg or "temperature" in msg:
+            kwargs.pop("temperature", None)
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+            r = client.chat.completions.create(**kwargs)
+        else:
+            raise
+    return _strip_think(r.choices[0].message.content or "")
+
+# ── Application tracker storage (no database) ─────────────────────────────────
+def empty_tracker() -> pd.DataFrame:
+    return pd.DataFrame(columns=TRACKER_COLS)
+
+def normalise_tracker(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce any tracker-like table (session, saved CSV, imported Excel) to the standard columns."""
+    if df is None or df.empty:
+        return empty_tracker()
+    df = df.copy()
+    lower = {c.lower().strip(): c for c in df.columns}
+    aliases = {"Company": ["company", "company name"], "Role": ["role", "job title", "position"],
+               "Date Applied": ["date applied", "date", "date_applied", "applied on"], "Status": ["status"]}
+    out = pd.DataFrame()
+    for col, names in aliases.items():
+        src = next((lower[n] for n in names if n in lower), None)
+        out[col] = df[src] if src is not None else ""
+    out["Company"] = out["Company"].fillna("").astype(str).str.strip()
+    out["Role"]    = out["Role"].fillna("").astype(str).str.strip()
+    out["Status"]  = out["Status"].fillna("").astype(str).str.strip()
+    out.loc[~out["Status"].isin(STATUS_OPTIONS), "Status"] = "Not Applied"
+    out["Date Applied"] = pd.to_datetime(out["Date Applied"], errors="coerce").dt.date
+    out = out[(out["Company"] != "") | (out["Role"] != "")]          # drop blank rows
+    return out.reset_index(drop=True)
+
+def merge_trackers(*dfs: pd.DataFrame) -> pd.DataFrame:
+    """Combine tracker tables; the same Company + Role + Date keeps only its latest entry."""
+    frames = [normalise_tracker(d) for d in dfs if d is not None and not d.empty]
+    if not frames:
+        return empty_tracker()
+    merged = pd.concat(frames, ignore_index=True)
+    key = (merged["Company"].str.lower() + "|" + merged["Role"].str.lower() + "|" + merged["Date Applied"].astype(str))
+    merged = merged.loc[~key.duplicated(keep="last")]
+    return merged.sort_values("Date Applied", na_position="last", kind="stable").reset_index(drop=True)
+
+def load_local_tracker() -> pd.DataFrame:
+    if not TRACKER_AUTOSAVE or not TRACKER_FILE.exists():
+        return empty_tracker()
+    try:
+        return normalise_tracker(pd.read_csv(TRACKER_FILE))
+    except Exception as e:
+        st.warning(f"⚠️ Could not read saved tracker {TRACKER_FILE}: {e}")
+        return empty_tracker()
+
+def save_local_tracker(df: pd.DataFrame):
+    if not TRACKER_AUTOSAVE:
         return
     try:
-        sb.table("applications").update({
-            "company": company, "role": role,
-            "date_applied": str(date_applied), "status": status
-        }).eq("id", row_id).execute()
+        TRACKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        normalise_tracker(df).to_csv(TRACKER_FILE, index=False)
     except Exception as e:
-        st.warning(f"⚠️ Could not sync edit to Supabase: {e}")
+        st.warning(f"⚠️ Could not save tracker to {TRACKER_FILE}: {e}")
+
+def read_tracker_upload(f) -> pd.DataFrame:
+    if f.name.lower().endswith(".csv"):
+        return normalise_tracker(pd.read_csv(f))
+    sheets = pd.read_excel(f, sheet_name=None)                 # all sheets
+    sheet = sheets.get("Application Tracker", next(iter(sheets.values())))
+    return normalise_tracker(sheet)
+
+def current_tracker() -> pd.DataFrame:
+    """Tracker including any edits made in the table on the previous run."""
+    live = st.session_state.get("tracker_edit_live")
+    return live if live is not None else st.session_state.tracker_edit
+
+def set_tracker(df: pd.DataFrame):
+    """Replace the tracker from outside the table (enhance, import, clear) and refresh the editor."""
+    st.session_state.tracker_edit = normalise_tracker(df)
+    st.session_state.tracker_edit_live = st.session_state.tracker_edit
+    st.session_state.tracker_version += 1
+    save_local_tracker(st.session_state.tracker_edit)
+
+# ── Google Sheets ──────────────────────────────────────────────────────────────
+GS_TRACKER_TAB = "Application Tracker"
+GS_SUMMARY_TAB = "Summary"
+
+def gs_configured() -> bool:
+    return gspread is not None and bool(GOOGLE_SA_JSON or GOOGLE_SA_FILE)
+
+def gs_service_email() -> str:
+    """The service account's email — a sheet must be shared with it (Editor) before the app can use it."""
+    try:
+        info = json.loads(GOOGLE_SA_JSON) if GOOGLE_SA_JSON else json.loads(Path(GOOGLE_SA_FILE).read_text())
+        return info.get("client_email", "")
+    except Exception:
+        return ""
+
+@st.cache_resource
+def get_gspread():
+    if GOOGLE_SA_JSON:
+        return gspread.service_account_from_dict(json.loads(GOOGLE_SA_JSON))
+    return gspread.service_account(filename=GOOGLE_SA_FILE)
+
+def gs_open(url_or_id: str):
+    gc = get_gspread()
+    u = url_or_id.strip()
+    return gc.open_by_url(u) if u.startswith("http") else gc.open_by_key(u)
+
+def gs_pull(url_or_id: str) -> pd.DataFrame:
+    sh = gs_open(url_or_id)
+    try:
+        ws = sh.worksheet(GS_TRACKER_TAB)
+    except gspread.exceptions.WorksheetNotFound:
+        return empty_tracker()                      # new/empty sheet
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        return empty_tracker()
+    return normalise_tracker(pd.DataFrame(rows[1:], columns=rows[0]))
+
+def _gs_tab(sh, title: str, rows: int, cols: int):
+    try:
+        ws = sh.worksheet(title)
+        ws.clear()
+        ws.resize(rows=rows, cols=cols)
+        return ws
+    except gspread.exceptions.WorksheetNotFound:
+        return sh.add_worksheet(title=title, rows=rows, cols=cols)
+
+def gs_push(df: pd.DataFrame, url_or_id: str) -> str:
+    """Write the tracker to the sheet (replacing the tracker tab) and a live Summary tab. Returns the sheet URL."""
+    sh = gs_open(url_or_id)
+    df = normalise_tracker(df)
+    df["Date Applied"] = df["Date Applied"].apply(lambda d: d.strftime("%Y-%m-%d") if pd.notna(d) else "")
+    values = [TRACKER_COLS] + df[TRACKER_COLS].astype(str).values.tolist()
+    n_rows = max(len(values) + 100, 200)                 # spare rows for adding entries in Sheets
+
+    ws = _gs_tab(sh, GS_TRACKER_TAB, n_rows, len(TRACKER_COLS))
+    ws.update(values=values, range_name="A1", value_input_option=ValueInputOption.user_entered)
+    ws.format("A1:D1", {"backgroundColor": {"red": 0.176, "green": 0.353, "blue": 0.239},
+                        "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                        "horizontalAlignment": "CENTER"})
+    ws.format("C2:C", {"numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"}})   # unambiguous dates
+    ws.freeze(rows=1)
+    sh.batch_update({"requests": [
+        {"setDataValidation": {   # Status dropdown, same options as the app
+            "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": n_rows, "startColumnIndex": 3, "endColumnIndex": 4},
+            "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": s} for s in STATUS_OPTIONS]},
+                     "showCustomUi": True, "strict": True}}},
+        {"setBasicFilter": {"filter": {"range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": n_rows,
+                                                 "startColumnIndex": 0, "endColumnIndex": len(TRACKER_COLS)}}}},
+        {"autoResizeDimensions": {"dimensions": {"sheetId": ws.id, "dimension": "COLUMNS",
+                                                 "startIndex": 0, "endIndex": len(TRACKER_COLS)}}},
+    ]})
+
+    # Summary uses formulas, so it stays correct when you edit statuses directly in Google Sheets
+    tab = f"'{GS_TRACKER_TAB}'"
+    summ = [["Status", "Count"]] + [[s, f'=COUNTIF({tab}!D2:D,"{s}")'] for s in STATUS_OPTIONS]
+    summ += [["Total", f"=COUNTA({tab}!A2:A)"], [], [f"Last synced from app {datetime.now().strftime('%Y-%m-%d %H:%M')}"]]
+    ss = _gs_tab(sh, GS_SUMMARY_TAB, len(summ) + 5, 2)
+    ss.update(values=summ, range_name="A1", value_input_option=ValueInputOption.user_entered)
+    ss.format("A1:B1", {"textFormat": {"bold": True}})
+    ss.format(f"A{len(STATUS_OPTIONS) + 2}:B{len(STATUS_OPTIONS) + 2}", {"textFormat": {"bold": True}})
+    return sh.url
+
+def gs_error_message(e: Exception) -> str:
+    email = gs_service_email()
+    share = f" Share the sheet with **{email}** as an Editor." if email else ""
+    if gspread and isinstance(e, gspread.exceptions.SpreadsheetNotFound):
+        return "Sheet not found — check the link." + share
+    if gspread and isinstance(e, gspread.exceptions.APIError):
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        if code in (403, 404):
+            return "No access to this sheet." + share
+        if code == 429:
+            return "Google Sheets rate limit hit — wait a minute and try again."
+    return str(e)
 
 # ── Text extraction ────────────────────────────────────────────────────────────
 def extract_pdf(file) -> str:
@@ -100,8 +320,8 @@ def load_base_resume() -> tuple[str, str]:
     return "", ""
 
 # ── PDF export ─────────────────────────────────────────────────────────────────
-_PDF_CHARS = {"\u2013":"-","\u2014":"-","\u2012":"-","\u2015":"-","\u2018":"'",
-              "\u2019":"'","\u201c":'"',"\u201d":'"',"\u2022":"-","\u2026":"...","\u00a0":" "}
+_PDF_CHARS = {"–":"-","—":"-","‒":"-","―":"-","‘":"'",
+              "’":"'","“":'"',"”":'"',"•":"-","…":"..."," ":" "}
 
 def sanitise(text: str) -> str:
     for c, r in _PDF_CHARS.items():
@@ -219,7 +439,8 @@ def generate_pdf(text: str) -> bytes:
 
 # ── Excel export ───────────────────────────────────────────────────────────────
 def export_excel(df: pd.DataFrame) -> bytes:
-    df = df.drop(columns=["#"], errors="ignore").copy()
+    df = normalise_tracker(df)
+    df["Date Applied"] = df["Date Applied"].apply(lambda d: d.strftime("%Y-%m-%d") if pd.notna(d) else "")
     out = io.BytesIO()
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Application Tracker"
     hfill = PatternFill("solid", fgColor="2D5A3D")
@@ -241,14 +462,31 @@ def export_excel(df: pd.DataFrame) -> bytes:
     for ci, col in enumerate(df.columns, 1):
         mx = max([len(str(col))] + [max(len(l) for l in str(v).split("\n")) for v in df[col].astype(str)])
         ws.column_dimensions[get_column_letter(ci)].width = min(max(mx + 4, 12), 60)
-    ws.freeze_panes = "A2"; wb.save(out); return out.getvalue()
+    ws.freeze_panes = "A2"
+    if len(df):
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(df.columns))}{len(df) + 1}"
+
+    # Summary sheet — count of applications per status
+    ss = wb.create_sheet("Summary")
+    for ci, h in enumerate(["Status", "Count"], 1):
+        c = ss.cell(1, ci, h); c.font = hfont; c.fill = hfill; c.alignment = halign; c.border = border
+    for ri, status in enumerate(STATUS_OPTIONS, 2):
+        ss.cell(ri, 1, status).border = border
+        ss.cell(ri, 2, int((df["Status"] == status).sum())).border = border
+    tr = len(STATUS_OPTIONS) + 2
+    ss.cell(tr, 1, "Total").font = Font(bold=True)
+    ss.cell(tr, 2, len(df)).font = Font(bold=True)
+    ss.cell(tr + 2, 1, f"Exported {datetime.now().strftime('%Y-%m-%d %H:%M')}").font = Font(italic=True, color="888888")
+    ss.column_dimensions["A"].width = 18; ss.column_dimensions["B"].width = 10
+
+    wb.save(out); return out.getvalue()
 
 # ── JD helpers ─────────────────────────────────────────────────────────────────
 _NOISE = [r"(?i)by continuing to use our platform", r"(?i)open app", r"(?i)privacy policy",
           r"(?i)cookie.*consent", r"(?i)your application will include", r"(?i)employer questions",
           r"(?i)registration no\.", r"(?i)\bEA No\b", r"(?i)company information",
           r"(?i)view all jobs", r"(?i)(full|part) time.*per month",
-          r"(?i)\$[\d,]+\s*[-\u2013]\s*\$[\d,]+\s*per\s*(month|year|hour)",
+          r"(?i)\$[\d,]+\s*[-–]\s*\$[\d,]+\s*per\s*(month|year|hour)",
           r"(?i)posted \d+\w* ago", r"(?i)(medium|high|low) application volume",
           r"(?i)(benefits.*allowance|variable bonus|apply now|quick apply|save job|report job|share this job|similar jobs|you might also like|javascript is disabled)",
           r"(?i)(central|north|south|east|west) region"]
@@ -522,20 +760,22 @@ _SS_DEFAULTS = {
     "enhanced_resume": "", "edited_resume": "", "_last_enhanced": "",
     "jd_text": "", "jd_filename": "", "jd_editable_value": "",
     "jd_widget_version": 0, "ats_result": None, "baseline_ats_result": None,
-    "enhance_count": 0, "is_enhancing": False, "override_resume_name": "", "override_resume_name": "",
+    "ats_model": "", "baseline_ats_model": "",
+    "enhance_count": 0, "is_enhancing": False, "override_resume_name": "",
     "skills_gap": None, "revision_history": [], "revision_version": 0,
     "resume_versions": [], "ats_score_cache": {}, "active_version_idx": 0,
-    "resume_versions": [], "ats_score_cache": {}, "active_version_idx": 0, "revision_version": 0,
 }
 for k, v in _SS_DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 if "tracker_edit" not in st.session_state:
-    st.session_state.tracker_edit = sb_load()
+    st.session_state.tracker_edit = load_local_tracker()   # empty unless TRACKER_AUTOSAVE=true
+if "tracker_version" not in st.session_state:
+    st.session_state.tracker_version = 0
 
 if "resume_text" not in st.session_state or not st.session_state.resume_text:
-    _t, _n = load_base_resume()
+    _t, _n = load_base_resume() if AUTO_LOAD_BASE_RESUME else ("", "")
     st.session_state.resume_text = _t
     st.session_state.base_resume_name = _n
 elif "base_resume_name" not in st.session_state:
@@ -554,22 +794,61 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 st.markdown("# 📄 AI Resume Enhancer")
-st.caption("Upload a JD — your base resume loads automatically from base_resume/.")
+st.caption("Upload your resume and a job description to get a tailored version.")
 st.divider()
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    if OPENAI_API_KEY:
-        st.success("✅ OpenAI API key loaded")
+
+    _providers = available_providers()
+    if not _providers:
+        st.error("❌ No AI provider configured. Add at least one of OPENAI_API_KEY, GROQ_API_KEY, "
+                 "OPENROUTER_API_KEY, GEMINI_API_KEY or OLLAMA_BASE_URL to .env")
     else:
-        st.error("❌ OPENAI_API_KEY not found in .env")
-    if SUPABASE_URL and SUPABASE_ANON_KEY:
-        st.success("✅ Supabase connected")
-    else:
-        st.warning("⚠️ Supabase not configured — add SUPABASE_URL and SUPABASE_ANON_KEY to .env")
-    model = st.selectbox("Model", ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
-                         help="gpt-4o gives the best results.")
+        _default_p = os.getenv("DEFAULT_PROVIDER", "")
+        provider = st.selectbox("AI provider", _providers,
+                                index=_providers.index(_default_p) if _default_p in _providers else 0,
+                                help="Only providers with a key/URL in .env are listed.")
+        _p = PROVIDERS[provider]
+        with st.spinner("Loading models…"):
+            _models = list_models(provider)
+
+        _CUSTOM = "✏️ Custom model name…"
+        _default_m = os.getenv(f"{_p['env_prefix']}_DEFAULT_MODEL", "")
+        _opts = _models + [_CUSTOM]
+        _choice = st.selectbox("Model (writing & revisions)", _opts,
+                               index=_opts.index(_default_m) if _default_m in _opts else 0,
+                               key=f"model_{provider}")
+        if _choice == _CUSTOM:
+            model = st.text_input("Model name", key=f"custom_model_{provider}",
+                                  placeholder="e.g. llama3.1:8b").strip()
+        else:
+            model = _choice
+
+        _fast_default = os.getenv(f"{_p['env_prefix']}_FAST_MODEL") or _p.get("fast") or model
+        _fast_opts = list(dict.fromkeys(([model] if model else []) + _models))
+        fast_model = st.selectbox("Model (scoring & JD extraction)", _fast_opts,
+                                  index=_fast_opts.index(_fast_default) if _fast_default in _fast_opts else 0,
+                                  key=f"fast_model_{provider}",
+                                  help="Used for ATS scoring, JD cleanup and skills gap. A smaller, faster model is fine here.") if _fast_opts else ""
+
+        if model:
+            LLM_CFG = {"provider": provider, "model": model, "fast_model": fast_model or model}
+            st.success(f"✅ {provider} ready")
+        else:
+            st.warning("⚠️ Pick or type a model name.")
+
+        if provider.startswith("Ollama"):
+            if not _models:
+                st.warning("No local models found. Run `ollama pull <model>` first, and check OLLAMA_BASE_URL.")
+            st.caption("Local models are slower and need a large context window — "
+                       "start Ollama with `OLLAMA_CONTEXT_LENGTH=16384` or higher.")
+
+    if TRACKER_AUTOSAVE:
+        st.caption(f"💾 Tracker history saved to `{TRACKER_FILE}`")
+    if gs_configured():
+        st.caption("🟢 Google Sheets connected")
     st.divider()
     output_dir = st.text_input("Save resumes to folder:", value="resume/")
     st.divider()
@@ -586,7 +865,7 @@ with col_resume:
         st.success(f"✅ Using override: **{st.session_state.override_resume_name}** ({len(st.session_state.resume_text.split())} words)")
         with st.expander("Preview override resume"):
             st.text(st.session_state.resume_text[:1500] + ("…" if len(st.session_state.resume_text) > 1500 else ""))
-        if st.button("↩ Revert to base_resume/"):
+        if AUTO_LOAD_BASE_RESUME and st.button("↩ Revert to base_resume/"):
             t, n = load_base_resume()
             if t:
                 st.session_state.resume_text = t
@@ -611,17 +890,20 @@ with col_resume:
             st.success(f"✅ Loaded **{n}** ({len(st.session_state.resume_text.split())} words)")
             with st.expander("Preview base resume"):
                 st.text(st.session_state.resume_text[:1500] + ("…" if len(st.session_state.resume_text) > 1500 else ""))
-            if st.button("🔄 Reload from base_resume/"):
+            if AUTO_LOAD_BASE_RESUME and st.button("🔄 Reload from base_resume/"):
                 t, n = load_base_resume()
                 if t:
                     st.session_state.resume_text = t; st.session_state.base_resume_name = n; st.rerun()
                 else:
                     st.error("No resume found in base_resume/.")
-        else:
+        elif AUTO_LOAD_BASE_RESUME:
             st.warning("⚠️ No resume found in `base_resume/` folder.")
-            st.caption("Place your resume (PDF, DOCX, or TXT) in `base_resume/` next to app.py.")
+            st.caption("Place your resume (PDF, DOCX, or TXT) in `base_resume/` next to app.py, or upload one below.")
+        else:
+            st.info("Upload your resume below to get started.")
 
-    with st.expander("Override: upload a different resume"):
+    with st.expander("Upload a resume" if not st.session_state.resume_text else "Override: upload a different resume",
+                     expanded=not st.session_state.resume_text):
         rf = st.file_uploader("Upload resume", type=["pdf","docx","txt"], label_visibility="collapsed", key="resume_upload")
         # Only process when a NEW file is uploaded — prevents re-clearing on every rerun
         if rf and rf.name != st.session_state.override_resume_name:
@@ -653,18 +935,20 @@ with col_jd:
             raw = extract_file(jf)
         if raw:
             pre = clean_jd(raw)
-            try:
-                r = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=30.0).chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role":"system","content":JD_EXTRACT_PROMPT},{"role":"user","content":pre}],
-                    temperature=0.0, max_tokens=1000)
-                ai_jd = r.choices[0].message.content.strip()
-            except openai.APITimeoutError:
+            if llm_ready():
+                try:
+                    with st.spinner("Cleaning up JD with AI…"):
+                        ai_jd = llm([{"role":"system","content":JD_EXTRACT_PROMPT},{"role":"user","content":pre}],
+                                    fast=True, temperature=0.0, max_tokens=1000) or pre
+                except openai.APITimeoutError:
+                    ai_jd = pre
+                    st.warning("⚠️ JD extraction timed out — using raw extracted text. Try again if the JD looks unclean.")
+                except Exception as e:
+                    ai_jd = pre
+                    st.warning(f"⚠️ AI JD extraction failed — using raw extracted text. Reason: {e}")
+            else:
                 ai_jd = pre
-                st.warning("⚠️ JD extraction timed out — using raw extracted text. Try again if the JD looks unclean.")
-            except Exception as e:
-                ai_jd = pre
-                st.warning(f"⚠️ AI JD extraction failed — using raw extracted text. Reason: {e}")
+                st.caption("No AI model selected — using raw extracted text.")
             st.session_state.jd_text = ai_jd
             st.session_state.jd_editable_value = ai_jd
             st.session_state.jd_filename = jf.name
@@ -716,27 +1000,27 @@ with col_clear:
         st.rerun()
 
 if enhance_clicked:
-    if not OPENAI_API_KEY:
-        st.error("OPENAI_API_KEY not found.")
+    if not llm_ready():
+        st.error("No AI provider/model selected — check the sidebar.")
     elif not st.session_state.resume_text.strip():
         st.error("Please upload a resume.")
     elif not st.session_state.jd_text.strip():
         st.error("Please upload a job description.")
     else:
         st.session_state.is_enhancing = True
-        client = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=60.0)
 
         with st.spinner("Step 1/3 — Scoring baseline resume…"):
             try:
-                r = client.chat.completions.create(model="gpt-4o-mini", temperature=BASELINE_ATS_TEMP, max_tokens=600,
-                    messages=[{"role":"system","content":BASELINE_ATS_PROMPT},
-                              {"role":"user","content":f"## Resume\n\n{st.session_state.resume_text}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"}])
-                st.session_state.baseline_ats_result = r.choices[0].message.content.strip()
+                st.session_state.baseline_ats_result = llm(
+                    [{"role":"system","content":BASELINE_ATS_PROMPT},
+                     {"role":"user","content":f"## Resume\n\n{st.session_state.resume_text}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"}],
+                    fast=True, temperature=BASELINE_ATS_TEMP, max_tokens=600)
+                st.session_state.baseline_ats_model = f"{LLM_CFG['provider']} / {LLM_CFG['fast_model']}"
             except Exception as e:
                 st.session_state.baseline_ats_result = None
                 st.warning(f"⚠️ Baseline ATS scoring failed: {e}")
 
-        with st.spinner("Step 2/3 — Enhancing your resume…"):
+        with st.spinner(f"Step 2/3 — Enhancing your resume with {LLM_CFG['model']}…"):
             try:
                 def sim(a, b):
                     wa, wb = set(a.lower().split()), set(b.lower().split())
@@ -751,18 +1035,17 @@ if enhance_clicked:
                 enhanced = None
                 for attempt in range(3):
                     temp = [0.7, 0.85, 0.9][attempt]
-                    candidate = client.chat.completions.create(model=model, temperature=temp, max_tokens=3500,
-                        messages=[{"role":"system","content":SYSTEM_PROMPT},{"role":"user","content":uc}]
-                    ).choices[0].message.content.strip()
+                    candidate = llm([{"role":"system","content":SYSTEM_PROMPT},{"role":"user","content":uc}],
+                                    temperature=temp, max_tokens=3500)
 
                     similarity = sim(st.session_state.resume_text, candidate)
                     cand_score = None
                     if baseline_total is not None:
                         try:
-                            qr = client.chat.completions.create(model="gpt-4o-mini", temperature=RETRY_ATS_TEMP, max_tokens=600,
-                                messages=[{"role":"system","content":RETRY_ATS_PROMPT},
-                                          {"role":"user","content":f"## Enhanced Resume\n\n{candidate}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"}])
-                            qm = re.search(r"TOTAL_SCORE:\s*([\d.]+)", qr.choices[0].message.content)
+                            qtext = llm([{"role":"system","content":RETRY_ATS_PROMPT},
+                                         {"role":"user","content":f"## Enhanced Resume\n\n{candidate}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"}],
+                                        fast=True, temperature=RETRY_ATS_TEMP, max_tokens=600)
+                            qm = re.search(r"TOTAL_SCORE:\s*([\d.]+)", qtext)
                             if qm: cand_score = float(qm.group(1))
                         except Exception:
                             pass  # Retry check failed — continue with attempt regardless
@@ -800,28 +1083,33 @@ if enhance_clicked:
                 src = st.session_state.get(wk, st.session_state.jd_text)
                 company = parse_jd_field(src, [r"(?i)company name", r"(?i)company"])
                 role    = parse_jd_field(src, [r"(?i)job title", r"(?i)role", r"(?i)position"])
-                st.session_state.tracker_edit = pd.concat([st.session_state.tracker_edit, pd.DataFrame([{
+                set_tracker(pd.concat([current_tracker(), pd.DataFrame([{
                     "Company": company, "Role": role,
-                    "Date Applied": str(date.today()), "Status": "Not Applied", "id": ""
-                }])], ignore_index=True)
+                    "Date Applied": date.today(), "Status": "Not Applied",
+                }])], ignore_index=True))
 
                 # ── Step 3: Skills gap analysis ──
                 # (ATS scoring of enhanced resume is now a manual button — see below)
                 try:
                     gap_content = f"## Resume\n\n{enhanced}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
-                    gr = client.chat.completions.create(model="gpt-4o-mini", temperature=0.0, max_tokens=800,
-                        messages=[{"role":"system","content":SKILLS_GAP_PROMPT},{"role":"user","content":gap_content}])
-                    st.session_state.skills_gap = gr.choices[0].message.content.strip()
+                    st.session_state.skills_gap = llm(
+                        [{"role":"system","content":SKILLS_GAP_PROMPT},{"role":"user","content":gap_content}],
+                        fast=True, temperature=0.0, max_tokens=800)
                 except Exception as e:
                     st.session_state.skills_gap = None
                     st.warning(f"⚠️ Skills gap analysis failed: {e}")
 
             except openai.AuthenticationError:
-                st.error("❌ Invalid API key — check OPENAI_API_KEY in your .env file.")
+                st.error(f"❌ Invalid API key for {LLM_CFG['provider']} — check your .env file.")
             except openai.RateLimitError:
-                st.error("❌ Rate limit hit — please wait a moment and try again.")
+                st.error("❌ Rate limit hit — free tiers have low limits. Wait a moment, or switch provider/model.")
+            except openai.NotFoundError:
+                st.error(f"❌ Model `{LLM_CFG['model']}` not found on {LLM_CFG['provider']}. Pick another model.")
             except openai.APITimeoutError:
-                st.error("❌ Request timed out — the API took too long to respond. Please try again.")
+                st.error("❌ Request timed out — the model took too long to respond. Try again or use a smaller model.")
+            except openai.APIConnectionError:
+                st.error(f"❌ Could not reach {LLM_CFG['provider']}. If using Ollama, check it is running "
+                         "(`ollama serve`) and that OLLAMA_BASE_URL is correct.")
             except Exception as e:
                 st.error(f"❌ Enhancement failed: {e}")
             finally:
@@ -896,8 +1184,8 @@ if st.session_state.skills_gap and st.session_state.enhanced_resume:
     def parse_gap_section(raw, label):
         m = re.search(label + r":\s*(.+?)(?=\n[A-Z]+:|$)", raw, re.S)
         if not m: return []
-        return [l.strip().lstrip("-\u2022 ").strip() for l in m.group(1).strip().split("\n")
-                if l.strip() and l.strip() not in ("-", "\u2022")]
+        return [l.strip().lstrip("-• ").strip() for l in m.group(1).strip().split("\n")
+                if l.strip() and l.strip() not in ("-", "•")]
 
     have    = parse_gap_section(raw_gap, "HAVE")
     missing = parse_gap_section(raw_gap, "MISSING")
@@ -970,26 +1258,29 @@ if st.session_state.enhanced_resume:
         with col_ats_info:
             st.caption("Click to score your enhanced resume — including after revisions.")
 
-        if run_ats:
+        if run_ats and not llm_ready():
+            st.error("No AI provider/model selected — check the sidebar.")
+        elif run_ats:
             current_resume = st.session_state.edited_resume or st.session_state.enhanced_resume
+            scorer = f"{LLM_CFG['provider']} / {LLM_CFG['fast_model']}"
             cache_key = hashlib.md5(
-                (current_resume + st.session_state.jd_text + str(st.session_state.revision_version)).encode()
+                (current_resume + st.session_state.jd_text + str(st.session_state.revision_version) + scorer).encode()
             ).hexdigest()
             if cache_key in st.session_state.ats_score_cache:
                 st.session_state.ats_result = st.session_state.ats_score_cache[cache_key]
+                st.session_state.ats_model = scorer
                 st.rerun()
             else:
                 with st.spinner("Scoring enhanced resume…"):
                     try:
-                        ar = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=30.0).chat.completions.create(
-                            model="gpt-4o-mini", temperature=0.0, max_tokens=600,
-                            messages=[{"role":"system","content":ENHANCED_ATS_PROMPT},
+                        result = llm([{"role":"system","content":ENHANCED_ATS_PROMPT},
                                       {"role":"user","content":(
                                           f"## Enhanced Resume\n\n{current_resume}"
                                           f"\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
-                                      )}])
-                        result = ar.choices[0].message.content.strip()
+                                      )}],
+                                     fast=True, temperature=ENHANCED_ATS_TEMP, max_tokens=600)
                         st.session_state.ats_result = result
+                        st.session_state.ats_model = scorer
                         st.session_state.ats_score_cache[cache_key] = result
                         st.rerun()
                     except openai.APITimeoutError:
@@ -1021,6 +1312,11 @@ if st.session_state.enhanced_resume:
                 c1.markdown(badge(bs["total"], "BASELINE RESUME"), unsafe_allow_html=True)
                 c2.markdown(badge(es["total"], "ENHANCED RESUME"), unsafe_allow_html=True)
                 c3.markdown(f'<div style="text-align:center;border:2px solid {ic};border-radius:12px;padding:12px 20px"><div style="font-size:11px;color:{ic};font-weight:600;margin-bottom:4px">IMPROVEMENT</div><div style="font-size:2.2rem;font-weight:800;color:{ic};line-height:1">{sign}{imp:.0f}</div><div style="font-size:11px;color:{ic}">points</div></div>', unsafe_allow_html=True)
+                if (st.session_state.baseline_ats_model and st.session_state.ats_model
+                        and st.session_state.baseline_ats_model != st.session_state.ats_model):
+                    st.caption(f"⚠️ Baseline was scored by {st.session_state.baseline_ats_model} and the enhanced "
+                               f"resume by {st.session_state.ats_model} — different models score differently, "
+                               "so the improvement figure is only a rough guide.")
             else:
                 st.markdown(badge(es["total"], "ENHANCED RESUME"), unsafe_allow_html=True)
             st.write("")
@@ -1032,11 +1328,17 @@ if st.session_state.enhanced_resume:
                     for l in es["improve"].split("\n"):
                         l = l.strip().lstrip("-•* ").strip()
                         if l: st.markdown(f"- {l}")
+        else:
+            st.warning("⚠️ The scoring model didn't return scores in the expected format. "
+                       "Try Re-run, or pick a stronger scoring model in the sidebar.")
 
 
 
 if st.session_state.enhanced_resume:
     with st.expander("🔍 Debug — verify ATS inputs & raw scores"):
+        if LLM_CFG:
+            st.caption(f"Provider: {LLM_CFG['provider']} · writing model: {LLM_CFG['model']} · "
+                       f"scoring model: {LLM_CFG['fast_model']}")
         st.markdown("**Baseline resume (full text sent to ATS scorer):**")
         st.text_area("Baseline", value=st.session_state.resume_text, height=200,
                      key="debug_baseline", disabled=True, label_visibility="collapsed")
@@ -1080,7 +1382,7 @@ if st.session_state.enhanced_resume:
     col_rev, col_reset_rev, _ = st.columns([1, 1, 4])
     with col_rev:
         apply_revision = st.button("✏️ Apply Revision", use_container_width=True,
-                                   disabled=not revision_input.strip())
+                                   disabled=not revision_input.strip() or not llm_ready())
     with col_reset_rev:
         if st.button("↺ Clear History", use_container_width=True):
             st.session_state.revision_history = []
@@ -1100,14 +1402,9 @@ if st.session_state.enhanced_resume:
                     f"If a skill is requested, add it to the Skills section. "
                     f"Output only the complete revised resume with all changes integrated."
                 )
-                rev_resp = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=60.0).chat.completions.create(
-                    model=model, temperature=0.5, max_tokens=3500,
-                    messages=[
-                        {"role": "system", "content": REVISION_PROMPT},
-                        {"role": "user", "content": rev_content}
-                    ]
-                )
-                revised = rev_resp.choices[0].message.content.strip()
+                revised = llm([{"role": "system", "content": REVISION_PROMPT},
+                               {"role": "user", "content": rev_content}],
+                              temperature=0.5, max_tokens=3500)
 
                 rev_num = len([v for v in st.session_state.resume_versions if "Revision" in v["label"]]) + 1
                 ts_rev = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1132,17 +1429,17 @@ if st.session_state.enhanced_resume:
 
                 try:
                     gap_content = f"## Resume\n\n{revised}\n\n---\n\n## JD\n\n{st.session_state.jd_text}"
-                    gr = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=30.0).chat.completions.create(
-                        model="gpt-4o-mini", temperature=0.0, max_tokens=800,
-                        messages=[{"role":"system","content":SKILLS_GAP_PROMPT},
-                                  {"role":"user","content":gap_content}])
-                    st.session_state.skills_gap = gr.choices[0].message.content.strip()
+                    st.session_state.skills_gap = llm(
+                        [{"role":"system","content":SKILLS_GAP_PROMPT},{"role":"user","content":gap_content}],
+                        fast=True, temperature=0.0, max_tokens=800)
                 except Exception as e:
                     st.caption(f"⚠️ Skills gap update failed after revision: {e}")
 
                 st.rerun()
             except openai.APITimeoutError:
-                st.error("❌ Revision timed out — the API took too long. Please try again.")
+                st.error("❌ Revision timed out — the model took too long. Please try again.")
+            except openai.APIConnectionError:
+                st.error(f"❌ Could not reach {LLM_CFG['provider']} — check it is running / reachable.")
             except Exception as e:
                 st.error(f"❌ Revision failed: {e}")
 
@@ -1151,95 +1448,110 @@ if st.session_state.enhanced_resume:
 
 # ── Application Tracker ────────────────────────────────────────────────────────
 st.divider(); st.subheader("📋 Application Tracker")
-st.caption("Entries are staged in session. Use the save form to push confirmed entries to Supabase.")
+st.caption("Each enhancement adds a row. Edit status and details in the table; add or delete rows directly. "
+           + ("History is saved automatically between sessions." if TRACKER_AUTOSAVE
+              else "To keep your history, download the Excel file and import it next time."))
 
-def get_defaults() -> dict:
-    df = st.session_state.tracker_edit
-    if df.empty:
-        return {
-            "company": parse_jd_field(st.session_state.jd_text, [r"(?i)company name", r"(?i)company"]),
-            "role":    parse_jd_field(st.session_state.jd_text, [r"(?i)job title", r"(?i)role", r"(?i)position"]),
-            "status":  "Not Applied"
-        }
-    last = df.iloc[-1]
-    return {"company": str(last.get("Company","NA") or "NA"),
-            "role":    str(last.get("Role","NA") or "NA"),
-            "status":  str(last.get("Status","Not Applied") or "Not Applied")}
+# ── Carry on from previous sessions: import an earlier export ──
+with st.expander("📂 Import previous applications (Excel or CSV)"):
+    st.caption("Upload a tracker you downloaded before. Its rows are combined with this session's — "
+               "duplicates (same company, role and date) are kept once.")
+    imp = st.file_uploader("Previous tracker", type=["xlsx", "csv"], accept_multiple_files=True,
+                           label_visibility="collapsed", key=f"tracker_import_{st.session_state.tracker_version}")
+    if imp and st.button("➕ Combine with current tracker"):
+        try:
+            before = len(current_tracker())
+            merged = merge_trackers(*[read_tracker_upload(f) for f in imp], current_tracker())
+            set_tracker(merged)
+            st.success(f"✅ Imported — tracker now has {len(merged)} application(s) (was {before}).")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Could not read that file: {e}")
 
-with st.expander("💾 Select & save entry to Supabase"):
-    df_s = st.session_state.tracker_edit
-    if df_s.empty:
-        st.info("No entries yet — enhance a resume first.")
-    else:
-        labels = [f"#{i+1} — {r.get('Company','NA')} | {r.get('Role','NA')} | {r.get('Date Applied','')}"
-                  for i, r in df_s.iterrows()]
-        sel = st.selectbox("Select entry:", labels, index=len(labels)-1, key="save_row_select")
-        si  = labels.index(sel)
-        row = df_s.iloc[si]
-
-        # Version key based on selected index — forces Streamlit to re-render
-        # inputs with the correct row data when selection changes
-        vk = f"_v{si}"
-
-        if st.button("🗑️ Delete this entry"):
-            st.session_state.tracker_edit = df_s.drop(index=df_s.index[si]).reset_index(drop=True); st.rerun()
-
-        st.divider(); st.markdown("**Review & edit before saving:**")
-        c1, c2 = st.columns(2)
-        with c1:
-            nc = st.text_input("Company", value=str(row.get("Company","NA") or "NA"), key=f"new_company{vk}")
-            nr = st.text_input("Role",    value=str(row.get("Role","NA") or "NA"),    key=f"new_role{vk}")
-        with c2:
-            try:   dv = pd.to_datetime(row.get("Date Applied", str(date.today()))).date()
-            except: dv = date.today()
-            nd = st.date_input("Date Applied", value=dv, key=f"new_date{vk}")
-            sv = str(row.get("Status","Not Applied") or "Not Applied")
-            ns = st.selectbox("Status", STATUS_OPTIONS,
-                              index=STATUS_OPTIONS.index(sv) if sv in STATUS_OPTIONS else 0, key=f"new_status{vk}")
-
-        st.info(f"📋 **Will save:** {nc} | {nr} | {nd} | {ns}")
-        if st.button("✅ Confirm & Save to Supabase"):
-            rid, err = sb_insert(nc, nr, nd, ns)
-            if err:
-                st.error(f"❌ {err}")
-            else:
-                idx = df_s.index[si]
-                for col, val in [("Company",nc),("Role",nr),("Date Applied",str(nd)),("Status",ns)]:
-                    st.session_state.tracker_edit.at[idx, col] = val
-                if rid: st.session_state.tracker_edit.at[idx, "id"] = rid
-                st.success(f"✅ Saved: {nc} — {nr}"); st.rerun()
-
-display_df = st.session_state.tracker_edit.drop(columns=["id"], errors="ignore").copy()
-if "Date Applied" in display_df.columns:
-    display_df["Date Applied"] = pd.to_datetime(display_df["Date Applied"], errors="coerce").dt.date
-display_df.insert(0, "#", range(1, len(display_df)+1))
-
-edited_t = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, disabled=["#"],
+# ── Editable table ──
+# The table's own state is keyed by tracker_version, so changes made outside the table
+# (new enhancement, import, clear) refresh it without re-applying old edits.
+edited_t = st.data_editor(
+    normalise_tracker(st.session_state.tracker_edit),
+    num_rows="dynamic", use_container_width=True, hide_index=False,
     column_config={
-        "#": st.column_config.NumberColumn("#", width="small"),
         "Company": st.column_config.TextColumn("Company"),
         "Role": st.column_config.TextColumn("Role"),
-        "Date Applied": st.column_config.DateColumn("Date Applied", format="YYYY-MM-DD"),
-        "Status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS, required=True),
-    }, key="tracker_editor")
+        "Date Applied": st.column_config.DateColumn("Date Applied", format="YYYY-MM-DD", default=date.today()),
+        "Status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS, default="Not Applied", required=True),
+    }, key=f"tracker_editor_{st.session_state.tracker_version}")
 
-edn = edited_t.drop(columns=["#"], errors="ignore")
-ddn = display_df.drop(columns=["#"], errors="ignore")
-if not edn.equals(ddn):
-    idc = st.session_state.tracker_edit["id"] if "id" in st.session_state.tracker_edit.columns else pd.Series(dtype=str)
-    for i, row in edn.iterrows():
-        sb_update(str(idc.iloc[i] if i < len(idc) else ""),
-                  str(row.get("Company","")), str(row.get("Role","")),
-                  str(row.get("Date Applied","")), str(row.get("Status","")))
-    eid = edn.copy()
-    if "id" in st.session_state.tracker_edit.columns:
-        eid["id"] = st.session_state.tracker_edit["id"].reindex(edn.index).values
-    st.session_state.tracker_edit = eid
+current = normalise_tracker(edited_t)
+_sig = hashlib.md5(current.to_csv(index=False).encode()).hexdigest()
+if st.session_state.get("_tracker_sig") != _sig:
+    st.session_state._tracker_sig = _sig
+    save_local_tracker(current)
+st.session_state.tracker_edit_live = current
 
-with st.columns([1, 5])[0]:
-    st.download_button("⬇ Export Excel", data=export_excel(edited_t),
-                       file_name=f"applications_{date.today()}.xlsx",
+counts = current["Status"].value_counts()
+st.caption(f"**{len(current)}** application(s) · " +
+           " · ".join(f"{s}: {int(counts.get(s, 0))}" for s in STATUS_OPTIONS if counts.get(s, 0)))
+
+c_dl, c_clear, _ = st.columns([1, 1, 4])
+with c_dl:
+    st.download_button("⬇ Export Excel", data=export_excel(current),
+                       file_name=f"applications_{datetime.now().strftime('%Y-%m-%d_%H%M')}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
+                       use_container_width=True, disabled=current.empty)
+with c_clear:
+    if st.button("🗑️ Clear tracker", use_container_width=True, disabled=current.empty):
+        st.session_state._confirm_clear_tracker = True
+st.caption("Tip: the Excel file also opens in Google Sheets — upload it to Google Drive and open it there.")
 
-st.caption("✅ Connected to Supabase" if SUPABASE_URL and SUPABASE_ANON_KEY else "⚠️ Supabase not configured — entries stored in session only.")
+with st.expander("🟢 Google Sheets — save / load your tracker"):
+    if gspread is None:
+        st.info("Google Sheets needs one more package: `pip install gspread`, then restart the app.")
+    elif not gs_configured():
+        st.info("Google Sheets isn't set up yet. Add GOOGLE_SERVICE_ACCOUNT_FILE (or GOOGLE_SERVICE_ACCOUNT_JSON) "
+                "to .env — see .env.example for the steps.")
+    else:
+        email = gs_service_email()
+        st.caption(f"1. Create a Google Sheet (any name) and share it with **{email or 'the service account'}** as **Editor**.  \n"
+                   "2. Paste its link below.  \n"
+                   "3. **Save** writes this tracker to the sheet (keeping rows that are only in the sheet). "
+                   "**Load** pulls the sheet into this tracker, e.g. after you've updated statuses in Google Sheets.")
+        if "gsheet_url" not in st.session_state:
+            st.session_state.gsheet_url = GOOGLE_SHEET_URL
+        gurl = st.text_input("Google Sheet link", key="gsheet_url",
+                             placeholder="https://docs.google.com/spreadsheets/d/…").strip()
+        g1, g2, _ = st.columns([1, 1, 4])
+        save_gs = g1.button("⬆ Save to Sheet", use_container_width=True, disabled=not gurl)
+        load_gs = g2.button("⬇ Load from Sheet", use_container_width=True, disabled=not gurl)
+        if save_gs:
+            with st.spinner("Saving to Google Sheets…"):
+                try:
+                    sheet_rows = gs_pull(gurl)
+                    merged = merge_trackers(sheet_rows, current)          # app wins on duplicates
+                    url = gs_push(merged, gurl)
+                    set_tracker(merged)
+                    st.session_state._gs_msg = f"✅ Saved {len(merged)} application(s) to [Google Sheets]({url})."
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ {gs_error_message(e)}")
+        if load_gs:
+            with st.spinner("Loading from Google Sheets…"):
+                try:
+                    sheet_rows = gs_pull(gurl)
+                    merged = merge_trackers(current, sheet_rows)          # sheet wins on duplicates
+                    set_tracker(merged)
+                    st.session_state._gs_msg = f"✅ Loaded {len(sheet_rows)} row(s) from the sheet — tracker now has {len(merged)}."
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ {gs_error_message(e)}")
+        if st.session_state.get("_gs_msg"):
+            st.success(st.session_state.pop("_gs_msg"))
+
+if st.session_state.get("_confirm_clear_tracker"):
+    st.warning("Remove all rows from the tracker" + (f" and the saved history file `{TRACKER_FILE}`" if TRACKER_AUTOSAVE else "")
+               + "? Export the Excel first if you want to keep them.")
+    y, n, _ = st.columns([1, 1, 4])
+    if y.button("Yes, clear", use_container_width=True):
+        st.session_state._confirm_clear_tracker = False
+        set_tracker(empty_tracker()); st.rerun()
+    if n.button("Cancel", use_container_width=True):
+        st.session_state._confirm_clear_tracker = False; st.rerun()
